@@ -16,6 +16,13 @@ from flask import Flask, jsonify, request
 
 from . import ai, analyze, db, render, report
 
+# Web equivalents of the card's emoji palette, so the dashboard and the pasted
+# card describe a stroke with the same colour.
+PIE_COLORS = {
+    "freestyle": "#4aa3ff", "backstroke": "#3ddc84", "breaststroke": "#f0883e",
+    "butterfly": "#bc7cff", "other": "#c9d1d9", "undetermined": "#6b7280",
+}
+
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>polarswim</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -96,6 +103,28 @@ async function pick(i){
      <pre id="card">${d.card.replace(/</g,'&lt;')}</pre></div>
    <div class="card" id="rev" style="display:none"></div>`;
   drawSpark(d.paces);
+  drawPie(d.mix);
+}
+function drawPie(mix){
+  const el=$('#pie'); if(!el||!mix||!mix.length)return;
+  const cx=75,cy=75,r=62; let a0=-Math.PI/2;
+  el.innerHTML=mix.map(m=>{
+    const a1=a0+2*Math.PI*m.pct/100;
+    const big=(a1-a0)>Math.PI?1:0;
+    const x0=cx+r*Math.cos(a0),y0=cy+r*Math.sin(a0);
+    const x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1);
+    // A single slice covering the whole circle cannot be drawn as an arc path.
+    const d=(m.pct>=99.99)
+      ? `M ${cx} ${cy-r} A ${r} ${r} 0 1 1 ${cx-0.01} ${cy-r} Z`
+      : `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${big} 1 ${x1} ${y1} Z`;
+    a0=a1;
+    return `<path d="${d}" fill="${m.color}" stroke="#171d24" stroke-width="1.5">
+            <title>${m.stroke} ${m.pct.toFixed(0)}%</title></path>`;
+  }).join('');
+  $('#legend').innerHTML=mix.map(m=>
+    `<div style="margin:3px 0"><span style="display:inline-block;width:11px;height:11px;
+     background:${m.color};border-radius:2px;margin-right:7px"></span>
+     ${m.stroke} <span class="dim">${m.yards} yd · ${m.pct.toFixed(0)}%</span></div>`).join('');
 }
 function drawSpark(p){
   const el=$('#spark'); if(!el||!p.length)return;
@@ -161,6 +190,9 @@ def create_app(db_url=None) -> Flask:
                     "yards": round((head["distance_m"] or 0) / 0.9144),
                     "duration": _fmt(head["duration_s"]), "avg_hr": head["avg_hr"]},
             sets=report.sets_for_workout(df, repairs),
+            mix=[{"stroke": k, "lengths": n, "pct": pct, "yards": n * 25,
+                  "color": PIE_COLORS.get(k, "#6b7280")}
+                 for k, n, pct in render.stroke_mix(df)],
             paces=[float(x) for x in df.sort_values("idx")["pace_s"]],
             repairs=len(res.repairs),
             card=render.strava_block(df, head))

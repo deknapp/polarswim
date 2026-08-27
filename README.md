@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 122 tests, no network
+pytest -q                                                    # 133 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -60,6 +60,12 @@ pace by length (taller = faster)
   1 ▅▅▅▅▅▄▅▆▅▃▁█▅▂▁▇▆▄▁▄▃█▃▆▃▄▃█▇▆
  31 █▃▃▂▄▄▆▅▇▄▇▅▅▃▄▃▄▄▄▃▄▄▇▄▄▁▇▄▂█
 ```
+
+The card is coloured. Strava descriptions are plain text — no markdown, no HTML, no
+ANSI colour — but emoji render in colour everywhere, so the stroke mix is a
+proportional stacked bar of coloured squares and every set row is tagged with its
+stroke's colour. The web dashboard draws the same breakdown as a real SVG pie using
+matching colours.
 
 ## Naming a workout
 
