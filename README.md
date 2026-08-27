@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 169 tests, no network
+pytest -q                                                    # 191 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -106,6 +106,21 @@ are built in: the stroke is inferred, so a best is provisional; and reps faster 
 65% of the swimmer's median pace are excluded as turn-detection artifacts — before
 that filter the "best" 25 yd freestyle was 13.6 s against a 26 s median, which is a
 split length, not a swim. 45 such reps were excluded.
+
+## Uploading to Strava
+
+Two outputs, because Strava takes two kinds of content:
+
+**The text card** (`polarswim card <date>`) pastes into an activity description.
+Plain text with coloured emoji, since that is all a description renders.
+
+**The image** — the *download image for Strava* button in the dashboard — is the
+full analysis as a PNG you can attach to the activity as a photo: stroke-mix donut,
+per-set table with heart-rate zones, relative speed and personal bests, and the zone
+key. It is built server-side as SVG and rasterised in the browser through a canvas,
+so it needs no plotting library and no external script. The SVG deliberately avoids
+`foreignObject` and any external reference, both of which taint a canvas and would
+make the export fail silently; a test enforces that.
 
 ## Naming a workout
 

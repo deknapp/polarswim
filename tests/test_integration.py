@@ -163,3 +163,33 @@ class TestDashboardMetrics:
         for token in ("zone", "speed", "class=\"chip\"", "class=\"pctbar\"",
                       "class=\"pr\"", "swim maximum"):
             assert token in page, f"dashboard is missing {token}"
+
+
+class TestImageExport:
+    """The downloadable graphic for uploading to Strava as a photo."""
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    def test_endpoint_serves_an_svg(self, client, workout_id):
+        r = client.get(f"/api/image/{workout_id}.svg")
+        assert r.status_code == 200
+        assert r.mimetype == "image/svg+xml"
+        body = r.get_data(as_text=True)
+        assert body.startswith("<svg") and body.rstrip().endswith("</svg>")
+
+    def test_image_reflects_the_workout(self, client, workout_id):
+        body = client.get(f"/api/image/{workout_id}.svg").get_data(as_text=True)
+        head = client.get(f"/api/workout/{workout_id}").get_json()["header"]
+        assert head["date"][:10] in body
+        assert f'{head["yards"]:,} yd' in body
+
+    def test_unknown_workout_is_404(self, client):
+        assert client.get("/api/image/1.svg").status_code == 404
+
+    def test_page_offers_the_download_button(self, client):
+        page = client.get("/").get_data(as_text=True)
+        assert "download image for Strava" in page
+        assert "function downloadImage" in page
+        assert "toBlob" in page          # the canvas rasterisation path

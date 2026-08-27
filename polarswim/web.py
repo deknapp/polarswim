@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import datetime as dt
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
-from . import ai, analyze, db, metrics, render, report
+from . import ai, analyze, db, image, metrics, render, report
 
 # Web equivalents of the card's emoji palette, so the dashboard and the pasted
 # card describe a stroke with the same colour.
@@ -129,6 +129,7 @@ async function pick(i){
        that distance and stroke (stroke is inferred, so treat it as provisional).</div>
    </div>
    <div class="card"><button onclick="copyCard()">copy Strava card</button>
+     <button onclick="downloadImage()">download image for Strava</button>
      <button class="alt" onclick="review()">AI review</button>
      <pre id="card">${d.card.replace(/</g,'&lt;')}</pre></div>
    <div class="card" id="rev" style="display:none"></div>`;
@@ -165,6 +166,31 @@ function drawSpark(p){
   }).join('');
 }
 function copyCard(){navigator.clipboard.writeText($('#card').textContent);}
+async function downloadImage(){
+  // Rasterise the server-rendered SVG through a canvas. No external library, and
+  // the SVG uses only <text> and shapes, so the canvas is never tainted.
+  const svg=await (await fetch(`/api/image/${cur.id}.svg`)).text();
+  const img=new Image();
+  const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
+  img.onload=()=>{
+    const scale=2;                       // 2x so it stays sharp on a phone
+    const c=document.createElement('canvas');
+    c.width=img.width*scale; c.height=img.height*scale;
+    const ctx=c.getContext('2d');
+    ctx.scale(scale,scale);
+    ctx.drawImage(img,0,0);
+    URL.revokeObjectURL(url);
+    c.toBlob(b=>{
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(b);
+      a.download=`swim-${cur.date.slice(0,10)}.png`;
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    },'image/png');
+  };
+  img.onerror=()=>alert('Could not render the image.');
+  img.src=url;
+}
 async function review(){
   const box=$('#rev'); box.style.display='block';
   box.innerHTML='<span class="dim">asking Claude…</span>';
@@ -241,6 +267,22 @@ def create_app(db_url=None) -> Flask:
             paces=[float(x) for x in df.sort_values("idx")["pace_s"]],
             repairs=len(res.repairs),
             card=render.strava_block(df, head))
+
+    @app.get("/api/image/<int:wid>.svg")
+    def workout_image(wid: int):
+        df = report.classified_lengths(engine, wid)
+        if df.empty:
+            return jsonify(error="not found"), 404
+        res = analyze.analyze(engine, workout_id=wid, persist=False)
+        ref = _reference()
+        sets = report.sets_for_workout(
+            df, {(r.workout_id, r.idx) for r in res.repairs}, ref)
+        mix = [{"stroke": k, "pct": pct, "yards": n * 25,
+                "color": PIE_COLORS.get(k, "#6b7280")}
+               for k, n, pct in render.stroke_mix(df)]
+        svg = image.workout_svg(_header(wid), sets, mix, ref.zone_bounds(),
+                                ref.hr_max, df)
+        return Response(svg, mimetype="image/svg+xml")
 
     @app.get("/api/review/<int:wid>")
     def review(wid: int):
