@@ -1,34 +1,41 @@
-"""SQLite storage: schema management and idempotent loading.
+"""Storage layer over SQLAlchemy Core.
 
-Every write is an upsert keyed on Polar's own identifiers, so a sync can be
-re-run over any range without creating duplicates or needing a "have I seen this"
-table. `INSERT ... ON CONFLICT DO UPDATE` keeps that in one statement per row
-rather than a read-then-write race.
+Every write is an upsert keyed on Polar's own identifiers, so a sync can be re-run
+over any date range without creating duplicates and without a "have I seen this"
+bookkeeping table.
+
+The engine is created from a URL, so the same code runs against local SQLite or a
+PostgreSQL server. SQLite needs two pragmas set per-connection (foreign keys are
+off by default there, and WAL lets the web UI read during a sync); both are
+applied only when the dialect is SQLite.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
-import sqlite3
 from pathlib import Path
 
+import sqlalchemy as sa
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+from .models import (ALL_TABLES, hr_samples, lengths, metadata, model_params,
+                     predictions, raw_payloads, sync_runs, workouts)
 from .parse import Workout
 
-DEFAULT_DB = Path.home() / ".polarswim" / "polarswim.db"
-_SCHEMA = Path(__file__).with_name("schema.sql")
+DEFAULT_DB_PATH = Path.home() / ".polarswim" / "polarswim.db"
 
 
-def _now() -> str:
+def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def _epoch(iso: str | None) -> int:
-    """Best-effort epoch seconds from Flow's local-time strings.
+def epoch_of(iso: str | None) -> int:
+    """Best-effort epoch seconds from Flow's naive local timestamps.
 
-    Flow emits naive local timestamps ('2026-08-19T17:11:11'). We store the
-    original string verbatim and derive this only for range queries, so a missing
-    or odd value degrades to 0 rather than failing the load.
+    The original string is stored verbatim; this is derived purely for range
+    queries, so an unparseable value degrades to 0 rather than failing the load.
     """
     if not iso:
         return 0
@@ -38,103 +45,154 @@ def _epoch(iso: str | None) -> int:
         return 0
 
 
-def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Open (creating if needed) the database with the schema applied."""
-    p = Path(path) if path else DEFAULT_DB
-    if str(p) != ":memory:":
-        p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")     # concurrent reads during a sync
-    conn.executescript(_SCHEMA.read_text())
-    return conn
+def make_url(path_or_url: str | Path | None) -> str:
+    """Accept a filesystem path or a full SQLAlchemy URL."""
+    if path_or_url is None:
+        return f"sqlite+pysqlite:///{DEFAULT_DB_PATH}"
+    s = str(path_or_url)
+    if "://" in s:
+        return s
+    if s == ":memory:":
+        return "sqlite+pysqlite:///:memory:"
+    return f"sqlite+pysqlite:///{s}"
 
 
-def known_workout_ids(conn: sqlite3.Connection) -> set[int]:
-    """Ids already stored, so a sync can skip re-fetching them."""
-    return {r[0] for r in conn.execute("SELECT id FROM workouts")}
+def connect(path_or_url: str | Path | None = None) -> Engine:
+    """Create the engine and ensure the schema exists."""
+    url = make_url(path_or_url)
+    if url.startswith("sqlite") and ":memory:" not in url:
+        Path(url.split("///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
+
+    engine = sa.create_engine(url, future=True)
+
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_conn, _record):    # noqa: ANN001
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys=ON")    # off by default in SQLite
+            cur.execute("PRAGMA journal_mode=WAL")   # readers don't block on a sync
+            cur.close()
+
+    metadata.create_all(engine)
+    return engine
 
 
-def upsert_workout(conn: sqlite3.Connection, w: Workout, raw: dict | None = None) -> None:
+# --- reads -----------------------------------------------------------------
+def known_workout_ids(engine: Engine) -> set[int]:
+    with engine.connect() as c:
+        return {r[0] for r in c.execute(sa.select(workouts.c.id))}
+
+
+def summary(engine: Engine) -> dict:
+    with engine.connect() as c:
+        scalar = lambda stmt: c.execute(stmt).scalar() or 0
+        return {
+            "workouts": scalar(sa.select(sa.func.count()).select_from(workouts)),
+            "pool_swims": scalar(sa.select(sa.func.count()).select_from(workouts)
+                                 .where(workouts.c.n_lengths > 0)),
+            "lengths": scalar(sa.select(sa.func.count()).select_from(lengths)),
+            "hr_samples": scalar(sa.select(sa.func.count()).select_from(hr_samples)),
+            "predictions": scalar(sa.select(sa.func.count()).select_from(predictions)),
+            "earliest": c.execute(sa.select(sa.func.min(workouts.c.start_time))).scalar() or "-",
+            "latest": c.execute(sa.select(sa.func.max(workouts.c.start_time))).scalar() or "-",
+        }
+
+
+# --- writes ----------------------------------------------------------------
+def upsert_workout(engine: Engine, w: Workout, raw: dict | None = None) -> None:
     """Load one workout and all its children in a single transaction."""
     interval = w.hr_interval_s or 1.0
-    with conn:                                    # commits, or rolls back entirely
-        conn.execute(
-            """INSERT INTO workouts
-                 (id, start_time, start_epoch, stop_time, sport_parent, sport_id,
-                  duration_s, distance_m, calories, avg_hr, max_hr, pool_length_m,
-                  pool_type, pool_lengths_reported, n_lengths, hr_interval_s,
-                  n_hr_samples, synced_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(id) DO UPDATE SET
-                  start_time=excluded.start_time, start_epoch=excluded.start_epoch,
-                  stop_time=excluded.stop_time, sport_parent=excluded.sport_parent,
-                  sport_id=excluded.sport_id, duration_s=excluded.duration_s,
-                  distance_m=excluded.distance_m, calories=excluded.calories,
-                  avg_hr=excluded.avg_hr, max_hr=excluded.max_hr,
-                  pool_length_m=excluded.pool_length_m, pool_type=excluded.pool_type,
-                  pool_lengths_reported=excluded.pool_lengths_reported,
-                  n_lengths=excluded.n_lengths, hr_interval_s=excluded.hr_interval_s,
-                  n_hr_samples=excluded.n_hr_samples, synced_at=excluded.synced_at""",
-            (w.id, w.start_time, _epoch(w.start_time), w.stop_time, w.sport_parent,
-             w.sport_id, w.duration_s, w.distance_m, w.calories, w.avg_hr, w.max_hr,
-             w.pool_length_m, w.pool_type, w.pool_lengths_reported, len(w.lengths),
-             w.hr_interval_s, len(w.hr_values), _now()),
-        )
+    row = dict(
+        id=w.id, start_time=w.start_time, start_epoch=epoch_of(w.start_time),
+        stop_time=w.stop_time, sport_parent=w.sport_parent, sport_id=w.sport_id,
+        duration_s=w.duration_s, distance_m=w.distance_m, calories=w.calories,
+        avg_hr=w.avg_hr, max_hr=w.max_hr, pool_length_m=w.pool_length_m,
+        pool_type=w.pool_type, pool_lengths_reported=w.pool_lengths_reported,
+        n_lengths=len(w.lengths), hr_interval_s=w.hr_interval_s,
+        n_hr_samples=len(w.hr_values), synced_at=now_iso(),
+    )
 
-        # Children are replaced wholesale: a re-fetch is authoritative, and this
+    with engine.begin() as c:                    # commits, or rolls back entirely
+        existing = c.execute(
+            sa.select(workouts.c.id).where(workouts.c.id == w.id)).scalar()
+        if existing is None:
+            c.execute(sa.insert(workouts).values(**row))
+        else:
+            c.execute(sa.update(workouts).where(workouts.c.id == w.id)
+                      .values(**{k: v for k, v in row.items() if k != "id"}))
+
+        # Children are replaced wholesale: a re-fetch is authoritative, so this
         # avoids orphans if Polar revises a session's length count.
-        conn.execute("DELETE FROM lengths WHERE workout_id = ?", (w.id,))
-        conn.executemany(
-            """INSERT INTO lengths
-                 (workout_id, idx, start_offset_s, duration_s, polar_style, strokes)
-               VALUES (?,?,?,?,?,?)""",
-            [(w.id, l.idx, l.start_offset_s, l.duration_s, l.polar_style, l.strokes)
-             for l in w.lengths],
-        )
+        c.execute(sa.delete(lengths).where(lengths.c.workout_id == w.id))
+        if w.lengths:
+            c.execute(sa.insert(lengths), [
+                dict(workout_id=w.id, idx=l.idx, start_offset_s=l.start_offset_s,
+                     duration_s=l.duration_s, polar_style=l.polar_style,
+                     strokes=l.strokes) for l in w.lengths])
 
-        conn.execute("DELETE FROM hr_samples WHERE workout_id = ?", (w.id,))
-        conn.executemany(
-            "INSERT INTO hr_samples (workout_id, t_s, hr) VALUES (?,?,?)",
-            [(w.id, i * interval, hr) for i, hr in enumerate(w.hr_values)],
-        )
+        c.execute(sa.delete(hr_samples).where(hr_samples.c.workout_id == w.id))
+        if w.hr_values:
+            c.execute(sa.insert(hr_samples), [
+                dict(workout_id=w.id, t_s=i * interval, hr=hr)
+                for i, hr in enumerate(w.hr_values)])
 
         if raw is not None:
-            conn.execute(
-                """INSERT INTO raw_payloads (workout_id, fetched_at, payload)
-                   VALUES (?,?,?)
-                   ON CONFLICT(workout_id) DO UPDATE SET
-                     fetched_at=excluded.fetched_at, payload=excluded.payload""",
-                (w.id, _now(), json.dumps(raw, separators=(",", ":"))),
-            )
+            c.execute(sa.delete(raw_payloads).where(raw_payloads.c.workout_id == w.id))
+            c.execute(sa.insert(raw_payloads).values(
+                workout_id=w.id, fetched_at=now_iso(),
+                payload=json.dumps(raw, separators=(",", ":"))))
 
 
-def start_run(conn: sqlite3.Connection, window_start: str, window_end: str) -> int:
-    cur = conn.execute(
-        "INSERT INTO sync_runs (started_at, window_start, window_end) VALUES (?,?,?)",
-        (_now(), window_start, window_end))
-    conn.commit()
-    return cur.lastrowid
+def start_run(engine: Engine, window_start: str, window_end: str) -> int:
+    with engine.begin() as c:
+        return c.execute(sa.insert(sync_runs).values(
+            started_at=now_iso(), window_start=window_start,
+            window_end=window_end)).inserted_primary_key[0]
 
 
-def finish_run(conn: sqlite3.Connection, run_id: int, *, events: int, fetched: int,
+def finish_run(engine: Engine, run_id: int, *, events: int, fetched: int,
                skipped: int, errors: int, note: str = "") -> None:
-    conn.execute(
-        """UPDATE sync_runs SET finished_at=?, events_seen=?, fetched=?, skipped=?,
-             errors=?, note=? WHERE id=?""",
-        (_now(), events, fetched, skipped, errors, note, run_id))
-    conn.commit()
+    with engine.begin() as c:
+        c.execute(sa.update(sync_runs).where(sync_runs.c.id == run_id).values(
+            finished_at=now_iso(), events_seen=events, fetched=fetched,
+            skipped=skipped, errors=errors, note=note))
 
 
-def summary(conn: sqlite3.Connection) -> dict:
-    """Headline counts, used by the CLI and handy in tests."""
-    q = lambda sql: conn.execute(sql).fetchone()[0]
-    return {
-        "workouts": q("SELECT COUNT(*) FROM workouts"),
-        "pool_swims": q("SELECT COUNT(*) FROM workouts WHERE n_lengths > 0"),
-        "lengths": q("SELECT COUNT(*) FROM lengths"),
-        "hr_samples": q("SELECT COUNT(*) FROM hr_samples"),
-        "earliest": q("SELECT COALESCE(MIN(start_time),'-') FROM workouts"),
-        "latest": q("SELECT COALESCE(MAX(start_time),'-') FROM workouts"),
-    }
+def save_predictions(engine: Engine, rows: list[dict]) -> int:
+    """Replace predictions for every workout represented in `rows`."""
+    if not rows:
+        return 0
+    ids = {r["workout_id"] for r in rows}
+    stamp = now_iso()
+    with engine.begin() as c:
+        c.execute(sa.delete(predictions).where(predictions.c.workout_id.in_(ids)))
+        c.execute(sa.insert(predictions),
+                  [{**r, "predicted_at": stamp} for r in rows])
+    return len(rows)
+
+
+def save_model_params(engine: Engine, params: dict[str, dict[str, float]]) -> None:
+    """Upsert the learned per-class parameters."""
+    stamp = now_iso()
+    with engine.begin() as c:
+        for cls, kv in params.items():
+            for k, v in kv.items():
+                hit = c.execute(sa.select(model_params.c.value).where(
+                    sa.and_(model_params.c.class_name == cls,
+                            model_params.c.param == k))).scalar()
+                vals = dict(value=float(v), updated_at=stamp)
+                if hit is None:
+                    c.execute(sa.insert(model_params).values(
+                        class_name=cls, param=k, **vals))
+                else:
+                    c.execute(sa.update(model_params).where(sa.and_(
+                        model_params.c.class_name == cls,
+                        model_params.c.param == k)).values(**vals))
+
+
+def load_model_params(engine: Engine) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    with engine.connect() as c:
+        for r in c.execute(sa.select(model_params)):
+            out.setdefault(r.class_name, {})[r.param] = r.value
+    return out

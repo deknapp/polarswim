@@ -11,10 +11,11 @@ bad payload should not abandon a multi-year backfill.
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Callable
+
+from sqlalchemy.engine import Engine
 
 from . import db
 from .client import FlowClient, FlowError, SessionExpired
@@ -37,7 +38,7 @@ class SyncResult:
 
 
 def sync_range(
-    conn: sqlite3.Connection,
+    engine: Engine,
     client: FlowClient,
     start: date,
     end: date,
@@ -52,19 +53,19 @@ def sync_range(
     reprocessing from `raw_payloads` is usually the better option).
     """
     res = SyncResult()
-    run_id = db.start_run(conn, start.isoformat(), end.isoformat())
+    run_id = db.start_run(engine, start.isoformat(), end.isoformat())
 
     progress(f"listing sessions {start} .. {end}")
     try:
         ids = client.exercise_ids(start, end)
     except SessionExpired:
-        db.finish_run(conn, run_id, events=0, fetched=0, skipped=0, errors=1,
+        db.finish_run(engine, run_id, events=0, fetched=0, skipped=0, errors=1,
                       note="session expired during discovery")
         raise
     res.events_seen = len(ids)
     progress(f"{len(ids)} sessions in range")
 
-    known = set() if force else db.known_workout_ids(conn)
+    known = set() if force else db.known_workout_ids(engine)
     todo = [i for i in ids if i not in known]
     res.skipped = len(ids) - len(todo)
     if limit is not None:
@@ -75,7 +76,7 @@ def sync_range(
             payload = client.analysis_details(tid)
             workouts = parse_details(payload)
         except SessionExpired:
-            db.finish_run(conn, run_id, events=res.events_seen, fetched=res.fetched,
+            db.finish_run(engine, run_id, events=res.events_seen, fetched=res.fetched,
                           skipped=res.skipped, errors=res.errors + 1,
                           note=f"session expired after {res.fetched} fetched")
             raise
@@ -86,7 +87,7 @@ def sync_range(
             continue
 
         for w in workouts:
-            db.upsert_workout(conn, w, raw=payload if w.id == tid else None)
+            db.upsert_workout(engine, w, raw=payload if w.id == tid else None)
             if w.is_pool_swim:
                 res.pool_swims += 1
         res.fetched += 1
@@ -94,7 +95,7 @@ def sync_range(
         progress(f"  [{n}/{len(todo)}] {tid}: {head.sport_parent if head else '?'}"
                  f" {len(head.lengths) if head else 0} lengths")
 
-    db.finish_run(conn, run_id, events=res.events_seen, fetched=res.fetched,
+    db.finish_run(engine, run_id, events=res.events_seen, fetched=res.fetched,
                   skipped=res.skipped, errors=res.errors,
                   note=f"{res.pool_swims} pool swims")
     return res
