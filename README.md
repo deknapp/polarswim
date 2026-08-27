@@ -135,7 +135,7 @@ Both are percentiles against the swimmer's own history, so they stay meaningful 
 fitness changes.
 
 The load model is **Banister TRIMP**: every second weighted by heart-rate reserve
-through . The exponential is the point. A plain integral of
+through `x · 0.64 · e^(1.92·x)`. The exponential is the point. A plain integral of
 heart rate is linear, so it scores 30 minutes easy and 15 minutes hard about
 equally; Edwards' zone weights (1–5) are better but still linear. Under Banister,
 30 minutes at 155 bpm outweighs two hours at 115 bpm — which matches how those two
