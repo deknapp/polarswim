@@ -14,7 +14,7 @@ import datetime as dt
 
 from flask import Flask, jsonify, request
 
-from . import ai, analyze, db, render, report
+from . import ai, analyze, db, metrics, render, report
 
 # Web equivalents of the card's emoji palette, so the dashboard and the pasted
 # card describe a stroke with the same colour.
@@ -55,6 +55,12 @@ PAGE = """<!doctype html>
         padding:7px 13px;font-weight:600;cursor:pointer;margin-right:8px}
  button.alt{background:var(--line);color:var(--fg)}
  .lo{color:var(--warn)}
+ .chip{display:inline-block;min-width:24px;text-align:center;border-radius:4px;
+       padding:1px 5px;color:#08131f;font-weight:700;font-size:11px}
+ .pctbar{display:inline-block;width:46px;height:7px;background:var(--line);
+         border-radius:3px;overflow:hidden;vertical-align:middle;margin-right:5px}
+ .pctbar i{display:block;height:100%}
+ .pr{color:#f0a848;font-weight:700}
  .bar{height:9px;background:var(--accent);border-radius:2px;display:inline-block}
  input[type=date]{background:var(--panel);color:var(--fg);border:1px solid var(--line);
         border-radius:5px;padding:5px}
@@ -95,16 +101,33 @@ async function pick(i){
    <div class="card"><svg id="spark" width="100%" height="90"></svg>
      <div class="dim" style="font-size:12px">pace per length — taller is faster</div></div>
    <div class="card"><table><tr><th>set</th><th>reps</th><th>stroke</th><th>conf</th>
-     <th>time</th><th>pace/25</th><th>HR+</th><th>rest</th></tr>
+     <th>time</th><th>zone</th><th>speed</th><th>pace/25</th><th>rest</th><th></th></tr>
      ${d.sets.map(s=>`<tr><td>${s.set_id}</td>
        <td><b>${s.reps}×${s.rep_yards}</b></td>
        <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
        <td>${s.confidence.toFixed(2)}</td>
        <td>${fmtTime(s.rep_seconds)}</td>
-       <td><span class="bar" style="width:${Math.round(50*(1-s.pace_s/maxp))+10}px"></span>
+       <td>${s.hr_zone?`<span class="chip" style="background:${s.hr_zone.color}">
+           ${s.hr_zone.zone}</span> <span class="dim">${s.hr_zone.pct_max}%</span>`
+           :'<span class="dim">–</span>'}</td>
+       <td>${s.speed?`<span class="pctbar"><i style="width:${s.speed.percentile}%;
+           background:${s.speed.color}"></i></span>
+           <span class="dim">${s.speed.percentile}%</span>`
+           :'<span class="dim">–</span>'}</td>
+       <td><span class="bar" style="width:${Math.round(45*(1-s.pace_s/maxp))+8}px"></span>
            ${s.pace_s.toFixed(0)}s</td>
-       <td>+${s.hr_cost.toFixed(0)}</td><td>${s.rest_before_s.toFixed(0)}s</td></tr>`).join('')}
+       <td>${s.rest_before_s.toFixed(0)}s</td>
+       <td>${s.pr?'<span class="pr" title="fastest recorded at this distance and stroke">★ PR</span>':''}</td></tr>`).join('')}
    </table></div>
+   <div class="card" style="font-size:12px">
+     <div class="dim" style="margin-bottom:6px">heart-rate zones — calibrated to your
+       observed swim maximum of ${d.hr_max} bpm, which runs below a land-based max</div>
+     ${d.zones.map(z=>`<span class="chip" style="background:${z.color}">${z.zone}</span>
+       <span style="margin-right:14px">${z.label} ${z.low}–${z.high}</span>`).join('')}
+     <div class="dim" style="margin-top:10px">speed — percentile against your own reps
+       of the same distance; higher is faster. ★ PR marks your fastest recorded time at
+       that distance and stroke (stroke is inferred, so treat it as provisional).</div>
+   </div>
    <div class="card"><button onclick="copyCard()">copy Strava card</button>
      <button class="alt" onclick="review()">AI review</button>
      <pre id="card">${d.card.replace(/</g,'&lt;')}</pre></div>
@@ -164,6 +187,18 @@ def create_app(db_url=None) -> Flask:
     app = Flask(__name__)
     engine = db.connect(db_url)
 
+    _ref_cache: dict = {}
+
+    def _reference():
+        """Swimmer reference over the whole history. Cached — it scans every length,
+        and only changes when a sync adds workouts."""
+        n = db.summary(engine)["lengths"]
+        if _ref_cache.get("n") != n:
+            _ref_cache["ref"] = metrics.build_reference(
+                engine, report.classified_lengths(engine))
+            _ref_cache["n"] = n
+        return _ref_cache["ref"]
+
     def _fmt(sec):
         m, s = divmod(int(sec or 0), 60)
         return f"{m}:{s:02d}"
@@ -192,11 +227,14 @@ def create_app(db_url=None) -> Flask:
         res = analyze.analyze(engine, workout_id=wid, persist=False)
         repairs = {(r.workout_id, r.idx) for r in res.repairs}
         head = _header(wid)
+        ref = _reference()
         return jsonify(
+            hr_max=ref.hr_max,
+            zones=ref.zone_bounds(),
             header={"date": head["start_time"][:16],
                     "yards": round((head["distance_m"] or 0) / 0.9144),
                     "duration": _fmt(head["duration_s"]), "avg_hr": head["avg_hr"]},
-            sets=report.sets_for_workout(df, repairs),
+            sets=report.sets_for_workout(df, repairs, ref),
             mix=[{"stroke": k, "lengths": n, "pct": pct, "yards": n * 25,
                   "color": PIE_COLORS.get(k, "#6b7280")}
                  for k, n, pct in render.stroke_mix(df)],

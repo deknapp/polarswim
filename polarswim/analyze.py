@@ -198,6 +198,7 @@ def add_features(df: pd.DataFrame, hr: dict[int, np.ndarray]) -> pd.DataFrame:
     """
     df = df.copy()
     costs = np.full(len(df), np.nan)
+    absolute = np.full(len(df), np.nan)
     for i, row in enumerate(df.itertuples()):
         series = hr.get(row.workout_id)
         if series is None or len(series) < 60:
@@ -207,8 +208,11 @@ def add_features(df: pd.DataFrame, hr: dict[int, np.ndarray]) -> pd.DataFrame:
         b = int(row.start_offset_s + row.duration_s) + HR_LAG_S + 5
         seg = series[min(a, len(series) - 1):min(b, len(series))]
         if len(seg) >= 3:
-            costs[i] = float(seg.mean()) - base
+            mean = float(seg.mean())
+            costs[i] = mean - base          # relative: effort within this session
+            absolute[i] = mean              # absolute: needed for HR zoning
     df["hr_cost"] = costs
+    df["hr_abs"] = absolute
 
     # Statistics use the set, not the rep: a set pools every rep of the same
     # distance, which is far more lengths to estimate a median and spread from.

@@ -133,3 +133,33 @@ class TestDashboardCharts:
             assert s["reps"] >= 1
             assert s["rep_yards"] >= 25
             assert s["rep_seconds"] > 0
+
+
+class TestDashboardMetrics:
+    """Zone, relative speed and PR columns, plus the key that explains them."""
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    def test_zone_key_is_present_and_anchored_to_the_swimmers_max(self, client, workout_id):
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        assert d["hr_max"] > 100
+        zones = d["zones"]
+        assert [z["zone"] for z in zones] == ["Z1", "Z2", "Z3", "Z4", "Z5"]
+        assert zones[-1]["high"] == d["hr_max"]
+
+    def test_sets_carry_zone_speed_and_pr_fields(self, client, workout_id):
+        for s in client.get(f"/api/workout/{workout_id}").get_json()["sets"]:
+            assert "hr_zone" in s and "speed" in s and "pr" in s
+            assert isinstance(s["pr"], bool)
+            if s["hr_zone"]:
+                assert s["hr_zone"]["color"].startswith("#")
+            if s["speed"]:
+                assert 0 <= s["speed"]["percentile"] <= 100
+
+    def test_page_renders_the_new_columns_and_key(self, client):
+        page = client.get("/").get_data(as_text=True)
+        for token in ("zone", "speed", "class=\"chip\"", "class=\"pctbar\"",
+                      "class=\"pr\"", "swim maximum"):
+            assert token in page, f"dashboard is missing {token}"

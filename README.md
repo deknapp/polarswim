@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 142 tests, no network
+pytest -q                                                    # 169 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -82,6 +82,30 @@ the same grouping.
 
 Statistics are still computed over the **set**, because pooling every rep of the
 same distance gives far more lengths to estimate a median and a spread from.
+
+## Swimmer-calibrated metrics
+
+The dashboard adds three columns, each referenced to this swimmer rather than a
+population table:
+
+**Heart-rate zone.** Anchored to the highest heart rate actually observed *while
+swimming* (172 bpm here). Maximum heart rate in water runs roughly 10–13 bpm below a
+land-based maximum — horizontal position, cooling water, less working muscle — so an
+age formula or a running max would place every boundary too high. Colour-coded, with
+the bpm ranges shown as a key.
+
+**Relative speed.** A rep's percentile against this swimmer's own reps of the **same
+distance**. Ranking within an inferred stroke was tried and rejected as circular: the
+classifier assigns fast lengths to freestyle, so a freestyle percentile mostly
+re-expresses the classifier's threshold, and it collapsed every slow length to 0%.
+Distance is measured rather than inferred, so it carries no such feedback loop.
+A distance with fewer than 30 reps reports nothing instead of a fragile number.
+
+**Personal best.** The fastest recorded time at a distance and stroke. Two caveats
+are built in: the stroke is inferred, so a best is provisional; and reps faster than
+65% of the swimmer's median pace are excluded as turn-detection artifacts — before
+that filter the "best" 25 yd freestyle was 13.6 s against a 26 s median, which is a
+split length, not a swim. 45 such reps were excluded.
 
 ## Naming a workout
 

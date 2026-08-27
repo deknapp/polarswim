@@ -51,8 +51,8 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     return analyze.classify(df, params)
 
 
-def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = None
-                     ) -> list[dict]:
+def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = None,
+                     ref=None) -> list[dict]:
     """Collapse one workout's lengths into per-set rows."""
     repairs = repairs or set()
     out = []
@@ -78,7 +78,29 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             "rest_before_s": float(g["rest_before_s"].iloc[0]),
             "note": note,
         })
+        if ref is not None:
+            row = out[-1]
+            mean_hr = ref.hr_max * 0 + _absolute_hr(g)
+            row["hr_zone"] = ref.hr_zone(mean_hr)
+            fastest = float(reps["duration_s"].sum().min())
+            median_rep = float(reps["duration_s"].sum().median())
+            row["speed"] = ref.speed_percentile(row["rep_yards"], median_rep)
+            row["pr"] = ref.check_pr(row["rep_yards"], row["stroke"], fastest,
+                                     int(g["workout_id"].iloc[0]))
+            row["best_rep_s"] = fastest
     return out
+
+
+def _absolute_hr(g: pd.DataFrame) -> float:
+    """Mean heart rate over a set, in bpm.
+
+    `hr_cost` is relative to the workout's own baseline, which is right for
+    comparing effort within a session but wrong for zoning — a zone is defined
+    against absolute maximum heart rate.
+    """
+    if "hr_abs" in g.columns and g["hr_abs"].notna().any():
+        return float(g["hr_abs"].mean())
+    return float("nan")
 
 
 def season_summary(engine: Engine, start: dt.date | None = None,
