@@ -1,0 +1,133 @@
+{
+ "id": 1000000000,
+ "exercises": {
+  "1000000001": {
+   "id": 1000000001,
+   "sport": {
+    "id": 103
+   },
+   "startTime": "2026-01-02T07:00:00",
+   "stopTime": "2026-01-02T07:30:00",
+   "duration": "PT30M0S",
+   "distance": 182.88,
+   "calories": 100,
+   "sportParent": "SWIMMING",
+   "latitude": null,
+   "longitude": null
+  }
+ },
+ "samples": {
+  "1000000001": {
+   "HEART_RATE": {
+    "samples": {
+     "values": [
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109
+     ],
+     "interval": "PT1S"
+    }
+   },
+   "SPEED": null,
+   "CADENCE": null,
+   "DISTANCE": null
+  }
+ },
+ "swimDatas": {
+  "1000000001": {
+   "swimmingSamples": {
+    "startTime": "2026-01-02T07:00:00",
+    "swimmingPool": [
+     {
+      "startOffset": "PT1M",
+      "duration": "PT29.6S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT1M29.6S",
+      "duration": "PT28S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT2M",
+      "duration": "PT28S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT2M29.6S",
+      "duration": "PT29.6S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT3M12.8S",
+      "duration": "PT28.8S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT3M41.6S",
+      "duration": "PT31.2S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT5M58.4S",
+      "duration": "PT28S",
+      "style": "OTHER",
+      "strokes": 0
+     },
+     {
+      "startOffset": "PT6M26.4S",
+      "duration": "PT27.2S",
+      "style": "OTHER",
+      "strokes": 0
+     }
+    ]
+   },
+   "swimmingStatistics": {
+    "distance": 182.88,
+    "freeStyleStatistics": null,
+    "backstrokeStatistics": null,
+    "breaststrokeStatistics": null,
+    "butterflyStatistics": null,
+    "otherSwimmingStatistics": {
+     "distance": 1394.46,
+     "strokeCount": 0,
+     "swimmingTimeTotal": "PT29M1.6S",
+     "heartrateAvg": 126,
+     "heartrateMax": 157,
+     "swolfAvg": null,
+     "poolTimeMin": "PT16S"
+    },
+    "totalStrokeCount": null,
+    "poolSwim": 8,
+    "poolInfo": {
+     "poolType": "YARDS",
+     "poolLength": 22.86
+    }
+   }
+  }
+ },
+ "laps": {
+  "1000000001": {
+   "automaticLaps": [],
+   "manualLaps": []
+  }
+ },
+ "zones": {
+  "1000000001": {
+   "HEART_RATE": []
+  }
+ }
+}

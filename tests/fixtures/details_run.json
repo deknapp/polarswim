@@ -1,0 +1,34 @@
+{
+ "id": 1000000002,
+ "exercises": {
+  "2000000002": {
+   "id": 2000000002,
+   "sport": {
+    "id": 1
+   },
+   "startTime": "2026-01-03T18:00:00",
+   "stopTime": "2026-01-03T18:40:00",
+   "duration": "PT40M0S",
+   "distance": 8000.0,
+   "calories": 420,
+   "sportParent": "RUNNING"
+  }
+ },
+ "samples": {
+  "2000000002": {
+   "HEART_RATE": {
+    "samples": {
+     "values": [
+      140,
+      141,
+      142
+     ],
+     "interval": "PT1S"
+    }
+   }
+  }
+ },
+ "swimDatas": {},
+ "laps": {},
+ "zones": {}
+}
