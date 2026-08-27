@@ -68,6 +68,8 @@ PAGE = """<!doctype html>
 <script>
 let swims=[],cur=null;
 const $=s=>document.querySelector(s);
+const fmtTime=s=>s<60?`${Math.round(s)}s`
+  :`${Math.floor(s/60)}:${String(Math.round(s%60)).padStart(2,'0')}`;
 async function boot(){
   const r=await (await fetch('/api/swims')).json();
   swims=r.swims; $('#sub').textContent=r.summary;
@@ -89,12 +91,14 @@ async function pick(i){
      ${d.repairs?`<span class="lo"> · ${d.repairs} merged length(s) repaired</span>`:''}</div>
    <div class="card"><svg id="spark" width="100%" height="90"></svg>
      <div class="dim" style="font-size:12px">pace per length — taller is faster</div></div>
-   <div class="card"><table><tr><th>set</th><th>×25</th><th>stroke</th><th>conf</th>
-     <th>pace</th><th>HR+</th><th>rest</th></tr>
-     ${d.sets.map(s=>`<tr><td>${s.set_id}</td><td>${s.n}</td>
+   <div class="card"><table><tr><th>set</th><th>reps</th><th>stroke</th><th>conf</th>
+     <th>time</th><th>pace/25</th><th>HR+</th><th>rest</th></tr>
+     ${d.sets.map(s=>`<tr><td>${s.set_id}</td>
+       <td><b>${s.reps}×${s.rep_yards}</b></td>
        <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
        <td>${s.confidence.toFixed(2)}</td>
-       <td><span class="bar" style="width:${Math.round(60*(1-s.pace_s/maxp))+12}px"></span>
+       <td>${fmtTime(s.rep_seconds)}</td>
+       <td><span class="bar" style="width:${Math.round(50*(1-s.pace_s/maxp))+10}px"></span>
            ${s.pace_s.toFixed(0)}s</td>
        <td>+${s.hr_cost.toFixed(0)}</td><td>${s.rest_before_s.toFixed(0)}s</td></tr>`).join('')}
    </table></div>

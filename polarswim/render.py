@@ -40,6 +40,11 @@ def _fmt_clock(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def _fmt_rep(seconds: float) -> str:
+    """Rep time: bare seconds under a minute, m:ss above — how a swimmer reads it."""
+    return f"{seconds:.0f}s" if seconds < 60 else _fmt_clock(seconds)
+
+
 def sparkline(values: list[float] | np.ndarray, invert: bool = False) -> str:
     """Map values onto block glyphs. `invert` so faster (lower) reads taller."""
     v = np.asarray([x for x in values if x is not None and not np.isnan(x)], dtype=float)
@@ -61,6 +66,14 @@ def _bar(value: float, lo: float, hi: float, width: int) -> str:
         return BAR * (width // 2)
     frac = 1.0 - (value - lo) / (hi - lo)          # invert: low pace = long bar
     return BAR * max(1, int(round(np.clip(frac, 0, 1) * width)))
+
+
+def _pool_yards(header: dict, df: pd.DataFrame) -> int:
+    """Pool length in yards, from the header or recovered from the lengths."""
+    metres = header.get("pool_length_m")
+    if not metres and "pool_m" in df.columns and df["pool_m"].notna().any():
+        metres = float(df["pool_m"].iloc[0])
+    return int(round((metres or 22.86) / 0.9144))
 
 
 def stroke_mix(df: pd.DataFrame) -> list[tuple[str, int, float]]:
@@ -90,7 +103,7 @@ def mix_bar(df: pd.DataFrame, width: int = MIX_WIDTH) -> str:
     return "".join(STROKE_COLOR.get(k, "⬛") * n for k, n in counts.items())
 
 
-def mix_legend(df: pd.DataFrame, pool_yd: int = 25) -> list[str]:
+def mix_legend(df: pd.DataFrame, pool_yd: int = 25) -> list[str]:  # noqa: D401
     """One line per stroke: colour, name, distance, share."""
     return [f"{STROKE_COLOR.get(k, '⬛')} {STROKE_GLYPH.get(k, k).strip():<5} "
             f"{n * pool_yd:>5} yd  {pct:>4.0f}%"
@@ -118,17 +131,20 @@ def set_card(df: pd.DataFrame, header: dict, hr_series=None) -> str:
 
     paces = df["pace_s"].dropna()
     lo, hi = (float(paces.min()), float(paces.max())) if len(paces) else (0.0, 1.0)
+    pool_yd = _pool_yards(header, df)
 
     for sid, g in df.groupby("set_id"):
-        n = len(g)
+        reps = g.groupby("rep_id")
+        n_reps = reps.ngroups
+        rep_yd = int(round(len(g) / n_reps)) * pool_yd
+        rep_time = float(reps["duration_s"].sum().median())
         med = float(g["pace_s"].median())
-        stroke = g["predicted"].mode()
-        label = STROKE_GLYPH.get(stroke.iloc[0] if len(stroke) else "undetermined", "  ? ")
-        stroke = g["predicted"].mode()
-        key = stroke.iloc[0] if len(stroke) else "undetermined"
-        bar = _bar(med, lo, hi, 8)
-        lines.append(f"{STROKE_COLOR.get(key, '⬛')} {n:>2}×25 {label} "
-                     f"{bar:<8} {med:>3.0f}s")
+        mode = g["predicted"].mode()
+        key = mode.iloc[0] if len(mode) else "undetermined"
+        label = STROKE_GLYPH.get(key, "  ? ")
+        bar = _bar(med, lo, hi, 7)
+        lines.append(f"{STROKE_COLOR.get(key, '⬛')} {n_reps:>2}×{rep_yd:<4} {label} "
+                     f"{bar:<7} {_fmt_rep(rep_time):>5}")
 
     return "\n".join(lines)
 

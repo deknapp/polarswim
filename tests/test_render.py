@@ -8,9 +8,12 @@ from polarswim import render
 
 @pytest.fixture
 def one_workout():
+    """Three unbroken reps of four lengths each — i.e. 3x100 in a 25 yd pool."""
     rows = []
     for i in range(1, 13):
-        rows.append(dict(idx=i, set_id=1 + (i - 1) // 4, pace_s=24.0 + (i % 4) * 3,
+        rows.append(dict(idx=i, rep_id=1 + (i - 1) // 4, set_id=1,
+                         rep_lengths=4, duration_s=24.0 + (i % 4) * 3,
+                         pace_s=24.0 + (i % 4) * 3, pool_m=22.86,
                          predicted="freestyle" if i % 4 else "breaststroke",
                          confidence=0.7, hr_cost=30.0))
     return pd.DataFrame(rows)
@@ -25,7 +28,7 @@ SQUARES = set(render.STROKE_COLOR.values())
 
 def _set_rows(card: str) -> list[str]:
     """The per-set lines only — not the header, the mix bar, or the rule."""
-    return [l for l in card.splitlines() if l[:1] in SQUARES and "×25" in l]
+    return [l for l in card.splitlines() if l[:1] in SQUARES and "×" in l]
 
 
 def test_set_rows_share_one_width(one_workout):
@@ -43,7 +46,7 @@ def test_every_set_row_carries_exactly_one_colour(one_workout):
 def test_set_row_colour_matches_its_stroke(one_workout):
     card = render.set_card(one_workout, HEADER)
     for row in _set_rows(card):
-        label = row.split("×25")[1].strip().split()[0]
+        label = row.split("×")[1].split(maxsplit=1)[1].split()[0]
         expected = next(k for k, v in render.STROKE_GLYPH.items()
                         if v.strip() == label)
         assert row[0] == render.STROKE_COLOR[expected]
@@ -57,6 +60,31 @@ def test_card_fits_a_phone(one_workout):
 def test_card_reports_real_totals(one_workout):
     card = render.set_card(one_workout, HEADER)
     assert "2026-08-19" in card and "1,525 yd" in card and "12 lengths" in card
+
+
+def test_card_reports_reps_not_raw_lengths(one_workout):
+    """Four unbroken lengths of a 25 yd pool is a 100, not four 25s."""
+    card = render.set_card(one_workout, HEADER)
+    assert "3×100" in card
+    assert "12×25" not in card
+
+
+def test_rep_time_is_the_sum_of_its_lengths(one_workout):
+    """A 100 shows its 100 time, not the time of one length inside it."""
+    card = render.set_card(one_workout, HEADER)
+    expected = one_workout.groupby("rep_id")["duration_s"].sum().median()
+    assert render._fmt_rep(expected) in card
+
+
+def test_pool_length_is_read_from_the_data():
+    """A 50 m pool must report 50 m reps, not 25 yd ones."""
+    df = pd.DataFrame([dict(idx=i, rep_id=1, set_id=1, rep_lengths=2,
+                            duration_s=45.0, pace_s=22.5, pool_m=45.72,
+                            predicted="freestyle", confidence=0.7, hr_cost=20.0)
+                       for i in (1, 2)])
+    card = render.set_card(df, {"start_time": "2026-01-01", "distance_m": 91.44,
+                                "duration_s": 90.0, "avg_hr": 120})
+    assert "1×100" in card
 
 
 def test_sparkline_length_matches_input():

@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 133 tests, no network
+pytest -q                                                    # 139 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -66,6 +66,22 @@ ANSI colour — but emoji render in colour everywhere, so the stroke mix is a
 proportional stacked bar of coloured squares and every set row is tagged with its
 stroke's colour. The web dashboard draws the same breakdown as a real SVG pie using
 matching colours.
+
+## Reps, not raw lengths
+
+The sensor records one row per pool length, but that is not how a practice is
+swum. Four unbroken lengths of a 25 yd pool is a **100**, and reporting it as four
+25s misdescribes the session.
+
+Consecutive lengths with no rest between them are grouped into a **rep**, and
+consecutive reps of equal distance into a **set** — so the card reads `4×50`, not
+`8×25`. The threshold is two seconds, chosen from the data rather than by feel: the
+observed gap distribution is sharply bimodal, with 64.6% of gaps exactly zero and
+only 0.5% falling between zero and two seconds, so anything from 0.5 s to 5 s gives
+the same grouping.
+
+Statistics are still computed over the **set**, because pooling every rep of the
+same distance gives far more lengths to estimate a median and a spread from.
 
 ## Naming a workout
 

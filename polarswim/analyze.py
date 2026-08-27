@@ -5,9 +5,12 @@ ground truth to train against and no vendor label to fall back on. What we do ha
 is 7,000+ lengths of timing plus a 1 Hz heart-rate stream, and enough structure to
 work with:
 
-  1. Sets.  Rests split a practice into sets. Within a set the swimmer is doing one
-     thing, so a set is the natural unit of context — and a length's own set gives
-     us a local reference that adapts to that day's effort and pool.
+  1. Reps and sets.  A gap over `REST_GAP_S` is a rest; below it the swimmer never
+     stopped, so those lengths are one continuous **rep** — four unbroken lengths of
+     a 25 yd pool is a 100, not four 25s, and reporting it as four 25s misdescribes
+     the practice. Consecutive reps of equal distance form a **set** (4x100). The
+     rep is the unit a swimmer thinks in; the set is the unit with enough lengths
+     to estimate from, so statistics are computed over the set.
 
   2. Turn-detection defects.  Polar's turn detection misses walls, fusing two
      lengths into one record. A slow length is ambiguous on its own — it could be a
@@ -47,7 +50,11 @@ from sqlalchemy.engine import Engine
 from .models import hr_samples, lengths, workouts
 
 REFERENCE_LENGTH_M = 22.86          # 25 yards; the unit all pace is normalized to
-REST_GAP_S = 15.0                   # gap between lengths that starts a new set
+# A gap longer than this is a rest; at or below it the swim is continuous. The
+# observed distribution is sharply bimodal — 64.6% of gaps are exactly zero and
+# only 0.5% fall between zero and two seconds — so anything from 0.5 s to 5 s
+# gives the same answer. Two seconds sits comfortably in that dead zone.
+REST_GAP_S = 2.0
 HR_LAG_S = 15                       # cardiac response lag when attributing HR
 CLASSES = ("freestyle", "backstroke", "breaststroke", "butterfly",
            "other", "undetermined")
@@ -125,15 +132,31 @@ def load_hr(engine: Engine, workout_ids: list[int]) -> dict[int, np.ndarray]:
 
 # --- structure -------------------------------------------------------------
 def assign_sets(df: pd.DataFrame) -> pd.DataFrame:
-    """Number the sets within each workout, splitting on rest gaps."""
+    """Group lengths into reps, then reps into sets.
+
+    A rep is an unbroken swim — consecutive lengths with no rest between them. A
+    set is a run of consecutive reps covering the same distance, which is how a
+    practice is actually written down (4x100, not 16x25).
+    """
     df = df.sort_values(["workout_id", "idx"]).copy()
     end = df["start_offset_s"] + df["duration_s"]
     prev_end = end.groupby(df["workout_id"]).shift(1)
     gap = df["start_offset_s"] - prev_end
-    new_set = (gap > REST_GAP_S) | gap.isna()
-    df["set_id"] = new_set.groupby(df["workout_id"]).cumsum().astype(int)
     df["rest_before_s"] = gap.fillna(0.0).clip(lower=0.0)
-    return df
+
+    new_rep = (gap > REST_GAP_S) | gap.isna()
+    df["rep_id"] = new_rep.groupby(df["workout_id"]).cumsum().astype(int)
+    df["rep_lengths"] = df.groupby(["workout_id", "rep_id"])["idx"].transform("size")
+
+    # A set is a run of consecutive reps of equal length. Detect the run breaks on
+    # one row per rep, then broadcast the set number back to every length.
+    reps = (df.drop_duplicates(["workout_id", "rep_id"])
+              .loc[:, ["workout_id", "rep_id", "rep_lengths"]].copy())
+    changed = (reps["rep_lengths"] != reps.groupby("workout_id")["rep_lengths"].shift(1))
+    reps["set_id"] = changed.groupby(reps["workout_id"]).cumsum().astype(int)
+    df = df.merge(reps[["workout_id", "rep_id", "set_id"]],
+                  on=["workout_id", "rep_id"], how="left")
+    return df.sort_values(["workout_id", "idx"]).reset_index(drop=True)
 
 
 def detect_merges(df: pd.DataFrame, max_factor: int = 4,
@@ -187,11 +210,15 @@ def add_features(df: pd.DataFrame, hr: dict[int, np.ndarray]) -> pd.DataFrame:
             costs[i] = float(seg.mean()) - base
     df["hr_cost"] = costs
 
+    # Statistics use the set, not the rep: a set pools every rep of the same
+    # distance, which is far more lengths to estimate a median and spread from.
     grp = df.groupby(["workout_id", "set_id"])["pace_s"]
     df["set_median_pace_s"] = grp.transform("median")
     df["set_size"] = df.groupby(["workout_id", "set_id"])["idx"].transform("size")
     df["set_cv"] = grp.transform(lambda s: s.std() / s.mean() if s.mean() else 0.0)
     df["pace_rel"] = df["pace_s"] / df["set_median_pace_s"]
+    df["rep_duration_s"] = df.groupby(
+        ["workout_id", "rep_id"])["duration_s"].transform("sum")
     return df
 
 

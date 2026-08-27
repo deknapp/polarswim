@@ -22,18 +22,45 @@ def _lengths(durations, pool_m=22.86, gaps=None, workout_id=1):
     return pd.DataFrame(rows)
 
 
-class TestSets:
-    def test_rest_gap_starts_a_new_set(self):
-        df = analyze.assign_sets(_lengths([25] * 6, gaps=[0, 2, 2, 40, 2, 2]))
-        assert df["set_id"].tolist() == [1, 1, 1, 2, 2, 2]
+class TestRepsAndSets:
+    """A rep is an unbroken swim; a set is a run of equal-distance reps."""
 
-    def test_continuous_swim_is_one_set(self):
-        df = analyze.assign_sets(_lengths([25] * 8, gaps=[0] + [2] * 7))
+    def test_unbroken_lengths_are_one_rep(self):
+        """Four lengths with no rest is a 100, not four 25s."""
+        df = analyze.assign_sets(_lengths([25] * 4, gaps=[0] * 4))
+        assert df["rep_id"].nunique() == 1
+        assert df["rep_lengths"].unique().tolist() == [4]
+
+    def test_a_rest_starts_a_new_rep(self):
+        df = analyze.assign_sets(_lengths([25] * 4, gaps=[0, 0, 30, 0]))
+        assert df["rep_id"].tolist() == [1, 1, 2, 2]
+
+    def test_gap_at_the_threshold_is_not_a_rest(self):
+        """A turn is not a rest; only a gap strictly over the threshold is."""
+        df = analyze.assign_sets(
+            _lengths([25] * 4, gaps=[0, analyze.REST_GAP_S, analyze.REST_GAP_S, 0]))
+        assert df["rep_id"].nunique() == 1
+
+    def test_equal_reps_group_into_one_set(self):
+        """4x100 is one set of four reps, not four separate sets."""
+        gaps = []
+        for r in range(4):
+            gaps += [30 if r else 0] + [0, 0, 0]
+        df = analyze.assign_sets(_lengths([25] * 16, gaps=gaps))
+        assert df["rep_id"].nunique() == 4
         assert df["set_id"].nunique() == 1
 
+    def test_a_change_of_distance_starts_a_new_set(self):
+        """2x50 then 2x100 is two sets."""
+        gaps = [0, 0] + [30, 0] + [30, 0, 0, 0] + [30, 0, 0, 0]
+        df = analyze.assign_sets(_lengths([25] * 12, gaps=gaps))
+        sizes = df.drop_duplicates("rep_id")["rep_lengths"].tolist()
+        assert sizes == [2, 2, 4, 4]
+        assert df["set_id"].nunique() == 2
+
     def test_rest_before_is_recorded(self):
-        df = analyze.assign_sets(_lengths([25] * 3, gaps=[0, 2, 40]))
-        assert df["rest_before_s"].tolist() == pytest.approx([0.0, 2.0, 40.0])
+        df = analyze.assign_sets(_lengths([25] * 3, gaps=[0, 0, 40]))
+        assert df["rest_before_s"].tolist() == pytest.approx([0.0, 0.0, 40.0])
 
 
 class TestMergeRepair:

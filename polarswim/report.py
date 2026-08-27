@@ -56,12 +56,20 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
     """Collapse one workout's lengths into per-set rows."""
     repairs = repairs or set()
     out = []
+    pool_yd = 25
+    if "pool_m" in df.columns and df["pool_m"].notna().any():
+        pool_yd = int(round(float(df["pool_m"].iloc[0]) / 0.9144))
     for sid, g in df.groupby("set_id"):
         mode = g["predicted"].mode()
         note = "repaired" if any((r.workout_id, r.idx) in repairs
                                  for r in g.itertuples()) else ""
+        reps = g.groupby("rep_id")
+        n_reps = reps.ngroups
         out.append({
             "set_id": int(sid),
+            "reps": int(n_reps),
+            "rep_yards": int(round(len(g) / n_reps)) * pool_yd,
+            "rep_seconds": float(reps["duration_s"].sum().median()),
             "n": int(len(g)),
             "stroke": mode.iloc[0] if len(mode) else "undetermined",
             "confidence": float(g["confidence"].mean()),
