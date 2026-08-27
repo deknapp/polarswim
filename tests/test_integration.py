@@ -102,3 +102,34 @@ class TestWebUI:
 
     def test_unknown_workout_is_404(self, client):
         assert client.get("/api/workout/1").status_code == 404
+
+
+class TestDashboardCharts:
+    """The pie is drawn client-side, so assert both halves exist: the element to
+    draw into, and the data to draw. A previous edit silently added the function
+    without the element, and the chart rendered as nothing."""
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    def test_page_contains_the_pie_element_and_its_drawing_code(self, client):
+        page = client.get("/").get_data(as_text=True)
+        for token in ('id="pie"', 'id="legend"', "function drawPie", "drawPie(d.mix)"):
+            assert token in page, f"dashboard is missing {token}"
+
+    def test_workout_endpoint_supplies_pie_data(self, client, workout_id):
+        mix = client.get(f"/api/workout/{workout_id}").get_json()["mix"]
+        assert mix
+        assert sum(m["pct"] for m in mix) == pytest.approx(100.0)
+        for slice_ in mix:
+            assert slice_["color"].startswith("#")
+            assert slice_["yards"] > 0
+
+    def test_sets_report_reps_not_raw_lengths(self, client, workout_id):
+        sets = client.get(f"/api/workout/{workout_id}").get_json()["sets"]
+        assert sets
+        for s in sets:
+            assert s["reps"] >= 1
+            assert s["rep_yards"] >= 25
+            assert s["rep_seconds"] > 0

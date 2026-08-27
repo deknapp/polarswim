@@ -89,6 +89,9 @@ async function pick(i){
    <div class="card"><b>${d.header.date}</b> · ${d.header.yards.toLocaleString()} yd ·
      ${d.header.duration} · avg ${d.header.avg_hr??'–'} bpm
      ${d.repairs?`<span class="lo"> · ${d.repairs} merged length(s) repaired</span>`:''}</div>
+   <div class="card" style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">
+     <svg id="pie" width="150" height="150" viewBox="0 0 150 150"></svg>
+     <div id="legend" style="font-size:13px"></div></div>
    <div class="card"><svg id="spark" width="100%" height="90"></svg>
      <div class="dim" style="font-size:12px">pace per length — taller is faster</div></div>
    <div class="card"><table><tr><th>set</th><th>reps</th><th>stroke</th><th>conf</th>
