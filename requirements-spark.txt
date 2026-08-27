@@ -1,0 +1,5 @@
+# Optional scale-out path, see polarswim/spark.py.
+# Not installed by default: PySpark needs a JVM, not just pip, and on a database
+# this size pandas is faster. Included for the case where the length table grows
+# past one machine.
+pyspark>=3.5

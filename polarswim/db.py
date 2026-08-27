@@ -63,7 +63,14 @@ def connect(path_or_url: str | Path | None = None) -> Engine:
     if url.startswith("sqlite") and ":memory:" not in url:
         Path(url.split("///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
 
-    engine = sa.create_engine(url, future=True)
+    # An in-memory SQLite database lives inside a single connection, so the
+    # default pool would hand out a fresh, empty database on every checkout.
+    # StaticPool keeps one connection for the engine's lifetime.
+    kwargs = {}
+    if ":memory:" in url:
+        from sqlalchemy.pool import StaticPool
+        kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
+    engine = sa.create_engine(url, future=True, **kwargs)
 
     if engine.dialect.name == "sqlite":
         @event.listens_for(engine, "connect")

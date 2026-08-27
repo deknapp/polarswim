@@ -1,60 +1,121 @@
 # polarswim
 
-Polar Flow computes per-length swim data — lap times, pool geometry, session
-structure — shows it to you in the web app, and then **omits it from every file
-export it offers**. Download a swim as FIT, TCX or CSV and you get heart rate and
-a timestamp. Nothing else. Every pace, speed, cadence and distance column comes
-back empty.
+Polar Flow computes per-length swim data — lap times, pool geometry, set structure —
+shows it to you in its web app, and then **omits it from every file export it
+offers**. Download a swim as FIT, TCX or CSV and you get heart rate and a timestamp.
+Nothing else: speed, pace, cadence and distance columns all come back empty.
 
-This pulls that data out of the same private endpoint the web app uses and loads
-it into a local SQLite database you can query.
+Worse, on an arm-worn sensor Polar's own stroke classifier gives up entirely. Across
+7,615 real lengths it labelled **every single one `OTHER`**, with a stroke count of
+zero.
+
+This recovers the per-length data from the same private endpoint the web app uses,
+loads it into a queryable database, and infers the stroke Polar couldn't.
 
 ```bash
-python -m polarswim sync --from 2024-01-01     # backfill into ~/.polarswim/polarswim.db
-python -m polarswim status                     # what's stored
-python -m polarswim lengths 8432902372         # one workout, length by length
-pytest -q                                      # 37 tests, no network needed
+pip install -r requirements.txt
+
+# Everything below runs against the committed sample database — no account needed.
+python -m polarswim --db sample/sample.db status
+python -m polarswim --db sample/sample.db analyze
+python -m polarswim --db sample/sample.db card 8432902372     # paste into Strava
+python -m polarswim --db sample/sample.db report --from 2026-08-01
+python -m polarswim --db sample/sample.db serve               # web UI on :8770
+
+pytest -q                                                     # 92 tests, no network
 ```
 
-Standard library only. `pytest` is the sole dependency, and only for the tests.
+`sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
 
-## What it recovers
+## The Strava card
 
-For one 47-minute masters practice, the FIT export contains 2820 rows of
-`(timestamp, heart_rate)` and a single lap marker covering the whole session.
-The same session through this tool:
+`polarswim card` emits plain Unicode sized for a phone, so it pastes straight into
+a Strava description:
 
 ```
-   #    start     dur   polar    strokes
-   1     60.0s   29.6s  OTHER    0
-   2     89.6s   28.0s  OTHER    0
-   3    120.0s   28.0s  OTHER    0
-  ...
-  61   2798.4s   20.8s  OTHER    0
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃🏊 2026-08-19  1,525 yd  47:03   ┃
+┃   61 lengths  ·  avg 126 bpm   ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│  6×25 brst ▇▇▇       29s       │
+│  4×25 free ▇▇▇▇      28s       │
+│  3×25 free ▇▇▇       30s       │
+│  3×25 drll ▇         36s       │
+│ 12×25 back ▇▇▇       32s       │
+│  1×25 free ▇▇▇▇▇     24s       │
+│  2×25 fly  ▇▇▇▇▇▇    20s       │
+│ 12×25 fly  ▇▇▇▇      28s       │
+│  2×25 back ▇▇▇       31s       │
+│  4×25 back ▇▇▇       30s       │
+│  2×25 back ▇▇        32s       │
+│  2×25 brst ▇▇▇▇▇     24s       │
+│  4×25 free ▇▇▇▇      28s       │
+│  3×25 free ▇▇▇▇      29s       │
+│  1×25 free ▇▇▇▇▇▇    21s       │
+└────────────────────────────────┘
+
+pace by length (taller = faster)
+  1 ▅▅▅▅▅▄▅▆▅▃▁█▅▂▁▇▆▄▁▄▃█▃▆▃▄▃█▇▆
+ 31 █▃▃▂▄▄▆▅▇▄▇▅▅▃▄▃▄▄▄▃▄▄▇▄▄▁▇▄▂█
 ```
 
-61 lengths, each with its own start offset and duration, in a 22.86 m (25 yard)
-pool — none of which survives into any file Polar will hand you.
+## Inferring stroke without labels
 
-Note the `polar` column. It is `OTHER` on every length, and `strokes` is 0.
-Polar's own stroke classifier needs the wrist-motion signature a watch produces;
-on an arm-worn optical sensor it has nothing to work with and gives up. **The lap
-times are real; the stroke labels are not there at all.** Inferring stroke from
-length timing and heart rate is the next stage of this project, and it is
-deliberately kept out of the storage layer.
+There is no ground truth here — the vendor labelled nothing, and hand-labelling
+years of practices is not realistic. So the classifier leans on structure instead:
 
-## How it's put together
+**Sets.** Rests split a practice into sets. Within a set the swimmer is doing one
+thing, which gives every length a local reference that adapts to that day's effort.
+
+**Repair before classify.** Polar's turn detection misses walls, fusing two lengths
+into one record. A slow length is ambiguous alone — merged pair, or genuinely slow
+drill? — but not in context. A merge is an **isolated near-integer multiple** of its
+set's median (2.0x, 3.9x); a drill set is **uniformly** slow (1.0–1.4x). Across the
+full dataset that split 77 slow lengths into 38 merges and 39 real drills. Repaired
+boundaries are marked `inferred_split` in the database and never silently mixed in
+with measured data.
+
+**Two axes, no assumed ordering.** Per length we derive normalized pace (seconds per
+25 yd, so a 50 m pool is comparable) and heart-rate cost above that workout's own
+baseline. Both matter, because per-swimmer speed order is *not* universal — plenty of
+swimmers are slower at backstroke than breaststroke. Nothing here assumes a ranking:
+
+| | pace | cost | reasoning |
+|---|---|---|---|
+| freestyle | fast | any | the dominant mode, and the default hypothesis |
+| butterfly | mid | **high** | expensive for the speed it buys |
+| breaststroke | slow | **low** | the glide phase makes it cheap |
+| backstroke | slow | **high** | working hard without travelling |
+| other | slow, uniform set | low | drill and kick share one class |
+
+Breaststroke and a weak backstroke are indistinguishable on pace and sit in opposite
+corners on cost — which is the whole reason for the second axis.
+
+**It says "undetermined".** Where the evidence doesn't separate two classes, that is
+the answer. On the full dataset 6% of lengths come back undetermined rather than
+being assigned a coin-flip label.
+
+**It learns.** Reference paces are estimated from the swimmer's own history and
+written to `model_params`, so they tighten as workouts are synced. Keeping the model
+in the database rather than a pickle makes it inspectable and diffable, and it is
+where ground-truth labels would pin the clusters if any were ever supplied.
+
+## Architecture
 
 | Module | Responsibility |
 |---|---|
-| `auth.py` | Resolve the browser credential. Accepts a pasted cURL command verbatim, decodes the session JWT's `exp` claim, and refuses to start a long backfill on a dead session |
-| `client.py` | HTTP against Flow's private API. Walks the calendar's **100-day maximum window**, retries 5xx with backoff, enforces a request floor, and recognises the HTML login page Flow serves with a 200 when a session lapses |
-| `parse.py` | Pure transformation. ISO-8601 durations (`PT1M29.6S`), per-length records, and heart rate — which arrives as a bare array plus a sampling interval rather than timestamped points |
-| `db.py` | Schema, idempotent upserts, transactional loads |
-| `sync.py` | The loop: discover, skip what's stored, fetch, parse, load |
-
-The layers are split this way so everything except the network is testable, and
-so a change to the parser doesn't require re-fetching anything.
+| `auth` | Credential from a pasted cURL; decodes the session JWT's `exp` and refuses to start a long backfill on a dead session |
+| `client` | Flow's private API — walks the calendar's **100-day cap**, retries 5xx, rate limits, and catches the HTML login page Flow serves with a 200 when a session lapses |
+| `parse` | Pure transformation: ISO-8601 durations, per-length records, HR arrays |
+| `models` | Schema as SQLAlchemy Core tables |
+| `db` | Idempotent upserts, transactional loads |
+| `sync` | Discover, skip stored, fetch, parse, load |
+| `analyze` | Sets, merge repair, features, classification, learned parameters |
+| `render` | Unicode cards |
+| `report` | pandas aggregation over a date range |
+| `ai` | Optional Claude review of one session |
+| `web` | Local Flask UI |
+| `spark` | Optional PySpark path (see below) |
 
 ## Schema
 
@@ -62,58 +123,74 @@ so a change to the parser doesn't require re-fetching anything.
 workouts ──┬── lengths       (workout_id, idx)   one row per pool length
            ├── hr_samples    (workout_id, t_s)   flattened from values[] + interval
            ├── raw_payloads  (workout_id)        untouched API response
-           └── predictions   (workout_id, idx)   inference output, kept separate
+           └── predictions   (workout_id, idx)   inference, kept apart from observation
 sync_runs                                        audit trail per run
 model_params                                     learned parameters, refined over time
 ```
 
-Decisions worth calling out:
+- **Polar's training id is the primary key**, so re-syncing any range is naturally
+  idempotent — no "have I seen this" table, no duplicates on overlapping windows.
+- **Raw payloads are retained.** The credential is short-lived and the API rate
+  limited, so `reparse` rebuilds every derived table with no network at all.
+- **Children are replaced, not merged, on re-fetch** — no orphans if Polar revises
+  a session's length count.
+- **Indexes follow the real queries**: browse by date, filter to swims, pull one
+  workout's children.
+- **`hr_samples` is `WITHOUT ROWID`** — a narrow composite-key table with hundreds
+  of thousands of rows, where the rowid indirection is pure waste.
+- **Declared once in SQLAlchemy Core**, so the same schema targets Postgres by
+  changing the URL: `--db postgresql+psycopg://host/polarswim`. A test compiles
+  every table against the Postgres dialect to catch SQLite-only constructs.
 
-- **Polar's training id is the primary key.** It's stable and globally unique, so
-  re-syncing any date range is naturally idempotent — no "have I seen this"
-  bookkeeping table, and no duplicate rows when windows overlap.
-- **Raw payloads are retained.** The credential is short-lived and the API is rate
-  limited, so re-fetching to fix a parser bug is expensive. `polarswim reparse`
-  rebuilds every derived table from stored payloads with no network at all.
-- **Children are replaced, not merged, on re-fetch.** If Polar revises a session's
-  length count, the stored rows follow it exactly rather than leaving orphans.
-- **Indexes follow the three real queries**: browse by date (`start_epoch`),
-  filter to swims (`sport_parent, start_epoch`), and pull one workout's lengths.
-- **`hr_samples` is `WITHOUT ROWID`** — it's a pure composite-key table with
-  millions of narrow rows, so the extra rowid indirection is wasted space.
-- **Inference output lives in its own table.** Predictions never overwrite what
-  Polar actually reported, so the classifier can be re-run and compared without
-  touching observed data.
+## AI review
 
-## Getting a credential
+`polarswim review <id>` asks Claude to review one session. It is given the derived
+set table and the learned parameters — and told explicitly which labels are inferred
+rather than measured, so it hedges where the data is weak instead of presenting a
+guess as fact.
 
-Flow has no public API for this data, and its session cookie is a ~1 hour JWT with
-no documented refresh. So you supply it, once per sync:
+Set `ANTHROPIC_API_KEY` in the environment or a git-ignored `.env`. Without a key the
+command falls back to a deterministic offline summary, so the app is fully usable
+with no credentials and the tests never make a network call.
+
+## PySpark
+
+`spark.py` expresses the per-set aggregation against a Spark DataFrame, installed
+separately via `requirements-spark.txt`. It is **not** the default and shouldn't be:
+at this scale pandas finishes in milliseconds while Spark's startup alone costs
+seconds, and it needs a JVM rather than just pip. It exists so the analysis wouldn't
+have to be rewritten if the length table outgrew one machine — swapping the local
+frame for `spark.read.jdbc` is the only change.
+
+## Syncing your own data
+
+Flow has no public API for this, and its session cookie is a ~1 hour JWT with no
+documented refresh — so you supply it once per sync:
 
 1. Open **flow.polar.com** and log in
-2. DevTools → **Network**, filter for `api/training`
-3. Open any training session, right-click one of those requests → **Copy as cURL**
+2. DevTools → **Network**, filter `api/training`
+3. Open any session, right-click one of those requests → **Copy as cURL**
 4. `pbpaste > ~/.polarswim/cookie.txt`
 
-Paste the whole cURL command — `auth.py` pulls the cookie out of it. If you copy a
-request from `localizations.flow.polar.com` by mistake (a separate, cookie-less
-host that serves UI translations), you get a clear error saying so rather than a
-confusing 401 later.
+Paste the whole cURL command; `auth.py` extracts the cookie. Copy a request from
+`localizations.flow.polar.com` by mistake — a separate, cookie-less host — and you
+get a clear error saying so rather than a confusing 401 later. Then:
 
-The credential is never written to the database or the repository, and
-`cookie.txt` and `*.db` are gitignored.
+```bash
+python -m polarswim sync --from 2024-01-01
+```
 
-## Scope and limits
+Credentials are never written to the database or the repository.
 
-This reads an **undocumented internal API**, which can change without notice. The
+## Limits
+
+This reads an **undocumented internal API** that can change without notice. The
 parser validates the payload shape and raises rather than silently returning empty
-results, so a change surfaces as a failure instead of quietly missing data.
+results, so a change surfaces as a failure instead of missing data. It requests your
+own data from your own account, sequentially, with a rate floor between calls.
 
-It requests your own data from your own account, sequentially, with a rate floor
-between calls.
-
-Pool geometry is not always populated — some sessions carry lengths with no
-`poolInfo` — so `pool_length_m` and `pool_type` are nullable and consumers must
-handle that.
+Stroke inference is an **estimate**, not a measurement. With no labels anywhere in
+the data, its self-consistency can be measured but its accuracy cannot — and nothing
+in the output pretends otherwise.
 
 MIT licensed.

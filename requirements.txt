@@ -1,3 +1,13 @@
-# The package itself uses only the Python standard library.
-# Tests need pytest.
+# Core pipeline
+SQLAlchemy>=2.0        # schema + queries; same code targets SQLite or PostgreSQL
+pandas>=2.0            # aggregation for analysis and reporting
+numpy>=1.24
+
+# Local web UI
+Flask>=3.0
+
+# Optional AI review (`polarswim review`). The app runs fully without it.
+anthropic>=0.40
+
+# Tests
 pytest>=7.0
