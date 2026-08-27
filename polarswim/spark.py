@@ -8,10 +8,14 @@ aggregation, expressed against a Spark DataFrame, so the analysis logic does not
 have to be rewritten when the length table stops fitting on one machine.
 
     pip install -r requirements-spark.txt
-    python -m polarswim analyze --engine spark
 
-`available()` is the guard the rest of the package uses; nothing here is imported
-unless the caller asks for it.
+There is deliberately no CLI flag for this — wiring a Spark switch into a command
+that does not need it would be worse than leaving the function to be called
+directly. `available()` is the guard; nothing here is imported unless a caller
+asks for it explicitly:
+
+    from polarswim.spark import set_aggregates
+    set_aggregates(lengths_df)
 """
 
 from __future__ import annotations

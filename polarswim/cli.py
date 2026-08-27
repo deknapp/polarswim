@@ -1,12 +1,12 @@
 """Command line entry point.
 
-    polarswim sync    [--from YYYY-MM-DD] [--to ...] [--limit N] [--force]
+    polarswim sync [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N] [--force]
     polarswim status
     polarswim analyze [--workout ID]
-    polarswim card    <workout_id>            Strava-pasteable Unicode card
-    polarswim review  <workout_id>            AI review (needs ANTHROPIC_API_KEY)
-    polarswim report  [--from ...] [--to ...]
-    polarswim serve   [--port 8770]           local web UI
+    polarswim card <workout_id>   Strava-pasteable Unicode card
+    polarswim review <workout_id>   AI review (needs ANTHROPIC_API_KEY)
+    polarswim report [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]
+    polarswim serve [--port 8770]   local web UI
     polarswim reparse
 """
 

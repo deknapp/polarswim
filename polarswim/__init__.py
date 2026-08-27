@@ -5,6 +5,9 @@ the web app, but omits it from every file export it offers — FIT, TCX and CSV 
 carry heart rate and nothing else. This package reads the same private endpoint the
 web app uses, normalizes the result, and loads it into a queryable local database.
 
+The committed sample database contains the author's own training data, already
+published publicly on Strava, so it carries no privacy concern.
+
 Layers, so each can be tested on its own:
 
     auth    resolve the browser session credential

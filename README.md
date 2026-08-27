@@ -26,6 +26,8 @@ pytest -q                                                     # 92 tests, no net
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
+This is my own training data, already published publicly on Strava, so there is no
+privacy concern in shipping it; no credentials, tokens, or API responses are included.
 
 ## The Strava card
 
