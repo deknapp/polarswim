@@ -34,6 +34,10 @@ STROKE_COLOR = {
 }
 MIX_WIDTH = 12          # squares in the stacked bar; 12 keeps it inside a phone
 
+# Zone colours as emoji. Deliberately a different family from the stroke palette
+# where possible, and both bars are labelled, so the two are never confused.
+ZONE_COLOR = {"Z1": "⬜", "Z2": "🟦", "Z3": "🟩", "Z4": "🟧", "Z5": "🟥"}
+
 
 def _fmt_clock(seconds: float) -> str:
     m, s = divmod(int(round(seconds)), 60)
@@ -110,6 +114,26 @@ def mix_legend(df: pd.DataFrame, pool_yd: int = 25) -> list[str]:  # noqa: D401
             for k, n, pct in stroke_mix(df)]
 
 
+def zone_bar(zone_time: list[dict], width: int = MIX_WIDTH) -> str:
+    """Time-in-zone as a proportional stacked bar, same idea as the stroke mix."""
+    total = sum(z.get("seconds", 0) for z in zone_time)
+    if not total:
+        return ""
+    counts = {}
+    for z in zone_time:
+        share = z["seconds"] / total
+        if share > 0:
+            counts[z["zone"]] = max(1, round(share * width))
+    while counts and sum(counts.values()) != width:
+        biggest = max(counts, key=counts.get)
+        counts[biggest] += 1 if sum(counts.values()) < width else -1
+        if counts[biggest] <= 0:
+            del counts[biggest]
+    order = [z["zone"] for z in zone_time]
+    return "".join(ZONE_COLOR.get(k, "⬜") * counts[k]
+                   for k in order if k in counts)
+
+
 def set_card(df: pd.DataFrame, header: dict, hr_series=None) -> str:
     """Per-set summary card.
 
@@ -123,10 +147,20 @@ def set_card(df: pd.DataFrame, header: dict, hr_series=None) -> str:
     avg_hr = header.get("avg_hr")
 
     lines.append(f"🏊 {date}   {dist_yd:,} yd   {dur}")
-    lines.append(f"   {len(df)} lengths" + (f"   ·   avg {avg_hr} bpm" if avg_hr else ""))
+    second = f"   {len(df)} lengths" + (f"   ·   avg {avg_hr} bpm" if avg_hr else "")
+    effort = header.get("effort") or {}
+    if effort.get("score") is not None:
+        second += f"   ·   load {effort['score']}"
+        if effort.get("intensity") is not None:
+            second += f"/int {effort['intensity']}"
+    lines.append(second)
+
     bar = mix_bar(df)
     if bar:
-        lines += ["", bar]
+        lines += ["", f"{bar}  stroke"]
+    zbar = zone_bar(header.get("zone_time") or [])
+    if zbar:
+        lines.append(f"{zbar}  HR zone")
     lines.append("─" * (WIDTH - 2))
 
     paces = df["pace_s"].dropna()
@@ -164,8 +198,21 @@ def strava_block(df: pd.DataFrame, header: dict) -> str:
     parts = [set_card(df, header), "", "pace by length (taller = faster)",
              length_chart(df)]
 
+    prs = header.get("prs") or []
+    if prs:
+        parts += [""] + [f"★ PR  {p}" for p in prs]
+
     legend = mix_legend(df)
     if legend:
         parts += [""] + legend
+
+    zone_time = header.get("zone_time") or []
+    if zone_time:
+        active = [z for z in zone_time if z.get("seconds")]
+        if active:
+            parts += ["", "  ".join(
+                f"{ZONE_COLOR.get(z['zone'], '⬜')}{z['zone']} {z['pct']:.0f}%"
+                for z in active)]
+
     parts += ["", "— polarswim"]
     return "\n".join(parts)

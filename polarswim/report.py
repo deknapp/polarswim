@@ -84,7 +84,8 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             row["hr_zone"] = ref.hr_zone(mean_hr)
             fastest = float(reps["duration_s"].sum().min())
             median_rep = float(reps["duration_s"].sum().median())
-            row["speed"] = ref.speed_percentile(row["rep_yards"], median_rep)
+            row["speed"] = ref.speed_percentile(row["rep_yards"], median_rep,
+                                                row["stroke"])
             row["pr"] = ref.check_pr(row["rep_yards"], row["stroke"], fastest,
                                      int(g["workout_id"].iloc[0]))
             row["best_rep_s"] = fastest
@@ -141,6 +142,74 @@ def season_summary(engine: Engine, start: dt.date | None = None,
                     for row in monthly.to_dict("records")],
         "median_pace_by_month": {str(k): v for k, v in pace_trend.items()},
     }
+
+
+def overall_summary(engine: Engine, ref) -> dict:
+    """Everything for the summary tab: totals, heart rate, load, and mix."""
+    import numpy as np
+    from .models import hr_samples as hr_t
+
+    heads = workout_headers(engine)
+    lengths_df = classified_lengths(engine)
+    if heads.empty:
+        return {"workouts": 0}
+
+    with engine.connect() as c:
+        hr = np.array([r[0] for r in c.execute(sa.select(hr_t.c.hr))], dtype=float)
+
+    # Time in each zone across the whole database, at one sample per second.
+    zone_time = []
+    for band in ref.zone_bounds():
+        lo, hi = band["low"], band["high"]
+        seconds = int(((hr >= lo) & (hr < hi)).sum()) if len(hr) else 0
+        zone_time.append({**band, "seconds": seconds,
+                          "pct": round(100 * seconds / max(1, len(hr)), 1)})
+
+    efforts = [ref.effort_score(int(w)) for w in heads["id"]]
+    efforts = [e["trimp"] for e in efforts if e]
+
+    mix = (lengths_df["predicted"].value_counts(normalize=True) * 100).round(1)
+    dates = pd.to_datetime(heads["start_time"])
+
+    return {
+        "workouts": int(len(heads)),
+        "yards": int(round(heads["distance_m"].sum() / 0.9144)),
+        "hours": round(float(heads["duration_s"].sum()) / 3600, 1),
+        "lengths": int(len(lengths_df)),
+        "first": str(heads["start_time"].min())[:10],
+        "last": str(heads["start_time"].max())[:10],
+        "weeks": max(1, int((dates.max() - dates.min()).days / 7)),
+        "hr_max": int(ref.hr_max),
+        "hr_mean": int(np.nanmean(hr)) if len(hr) else 0,
+        "hr_p95": int(np.percentile(hr, 95)) if len(hr) else 0,
+        "hr_samples": int(len(hr)),
+        "zone_time": zone_time,
+        "total_trimp": round(sum(efforts), 1),
+        "mean_trimp": round(sum(efforts) / max(1, len(efforts)), 1),
+        "stroke_mix_pct": mix.to_dict(),
+        "longest_yards": int(round(heads["distance_m"].max() / 0.9144)),
+        "implausible_reps": int(getattr(ref, "implausible_reps", 0)),
+    }
+
+
+def personal_bests(engine: Engine, ref) -> list[dict]:
+    """Every distance/stroke best, newest-first within distance."""
+    heads = workout_headers(engine).set_index("id")
+    out = []
+    for (yards, stroke), best in ref.best_rep.items():
+        wid = best["workout_id"]
+        out.append({
+            "yards": int(yards),
+            "stroke": stroke,
+            "seconds": round(best["seconds"], 1),
+            "pace_per_25": round(best["seconds"] / (yards / 25.0), 1),
+            "date": best["date"],
+            "workout_id": int(wid),
+            "n_attempts": int(len(ref.rep_times_by_distance_stroke.get(
+                (int(yards), stroke), []))),
+        })
+    out.sort(key=lambda r: (r["yards"], r["stroke"]))
+    return out
 
 
 def format_season(summary: dict) -> str:

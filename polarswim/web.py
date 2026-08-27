@@ -61,14 +61,29 @@ PAGE = """<!doctype html>
          border-radius:3px;overflow:hidden;vertical-align:middle;margin-right:5px}
  .pctbar i{display:block;height:100%}
  .pr{color:#f0a848;font-weight:700}
+ .tab{background:transparent;color:var(--dim);border:1px solid transparent;
+      font-weight:600;padding:6px 12px;margin-right:4px}
+ .tab.on{background:var(--panel);color:var(--fg);border-color:var(--line)}
+ .stat{display:inline-block;min-width:150px;margin:0 26px 18px 0;vertical-align:top}
+ .stat b{display:block;font-size:26px;font-weight:700;line-height:1.25}
+ .stat span{color:var(--dim);font-size:12px;text-transform:uppercase;
+            letter-spacing:.6px}
+ .zrow{display:flex;align-items:center;gap:10px;margin:5px 0;font-size:13px}
+ .ztrack{flex:1;height:12px;background:var(--line);border-radius:3px;overflow:hidden}
+ .ztrack i{display:block;height:100%}
+ h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;
+    margin:0 0 12px}
  .bar{height:9px;background:var(--accent);border-radius:2px;display:inline-block}
  input[type=date]{background:var(--panel);color:var(--fg);border:1px solid var(--line);
         border-radius:5px;padding:5px}
 </style></head><body>
 <header><h1>polarswim</h1><span class="dim" id="sub">loading…</span>
   <span style="flex:1"></span>
-  <input type="date" id="from"><input type="date" id="to">
-  <button class="alt" onclick="loadReport()">report</button>
+  <nav id="tabs">
+    <button class="tab on" data-tab="workouts" onclick="tab('workouts')">workouts</button>
+    <button class="tab" data-tab="summary" onclick="tab('summary')">summary</button>
+    <button class="tab" data-tab="prs" onclick="tab('prs')">personal bests</button>
+  </nav>
 </header>
 <div class="wrap"><aside id="list"></aside><main id="main"></main></div>
 <script>
@@ -94,7 +109,13 @@ async function pick(i){
   $('#main').innerHTML=`
    <div class="card"><b>${d.header.date}</b> · ${d.header.yards.toLocaleString()} yd ·
      ${d.header.duration} · avg ${d.header.avg_hr??'–'} bpm
-     ${d.repairs?`<span class="lo"> · ${d.repairs} merged length(s) repaired</span>`:''}</div>
+     ${d.repairs?`<span class="lo"> · ${d.repairs} merged length(s) repaired</span>`:''}
+     ${d.effort?`<div style="margin-top:10px">
+       <span class="chip" style="background:${d.effort.color}">${d.effort.score}</span>
+       <span class="dim" style="margin-right:16px">relative load (of 100)</span>
+       ${d.effort.intensity!=null?`<span class="chip"
+         style="background:${d.effort.intensity_color}">${d.effort.intensity}</span>
+       <span class="dim">intensity (of 100)</span>`:''}</div>`:''}</div>
    <div class="card" style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">
      <svg id="pie" width="150" height="150" viewBox="0 0 150 150"></svg>
      <div id="legend" style="font-size:13px"></div></div>
@@ -198,6 +219,77 @@ async function review(){
   box.innerHTML=`<div class="dim" style="font-size:12px">${d.model}</div>
     <div style="white-space:pre-wrap">${d.text.replace(/</g,'&lt;')}</div>`;
 }
+function tab(name){
+  document.querySelectorAll('.tab').forEach(b=>
+    b.classList.toggle('on', b.dataset.tab===name));
+  document.querySelector('aside').style.display = name==='workouts'?'':'none';
+  if(name==='workouts'){ cur?pick(swims.indexOf(cur)):pick(0); }
+  else if(name==='summary') loadSummary();
+  else loadPRs();
+}
+async function loadSummary(){
+  $('#main').innerHTML='<div class="card dim">loading…</div>';
+  const d=await (await fetch('/api/summary')).json();
+  const stat=(v,l)=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`;
+  $('#main').innerHTML=`
+   <div class="card">
+     ${stat(d.workouts,'swims')}${stat(d.yards.toLocaleString(),'yards')}
+     ${stat(d.hours+'h','pool time')}${stat(d.lengths.toLocaleString(),'lengths')}
+     ${stat(d.weeks,'weeks')}
+   </div>
+   <div class="card"><h2>heart rate</h2>
+     ${stat(d.hr_max,'max observed')}${stat(d.hr_p95,'95th percentile')}
+     ${stat(d.hr_mean,'mean')}${stat(d.hr_samples.toLocaleString(),'samples')}
+     <div style="margin-top:14px">
+     ${d.zone_time.map(z=>`<div class="zrow">
+       <span class="chip" style="background:${z.color}">${z.zone}</span>
+       <span style="width:150px" class="dim">${z.label} ${z.low}–${z.high}</span>
+       <span class="ztrack"><i style="width:${z.pct}%;background:${z.color}"></i></span>
+       <span style="width:100px" class="dim">${(z.seconds/3600).toFixed(1)}h · ${z.pct}%</span>
+     </div>`).join('')}</div>
+   </div>
+   <div class="card"><h2>training load</h2>
+     ${stat(Math.round(d.total_trimp),'total load')}
+     ${stat(Math.round(d.mean_trimp),'mean per swim')}
+     ${stat(d.longest_yards.toLocaleString(),'longest swim (yd)')}
+     <div class="dim" style="font-size:12px;margin-top:8px">
+       Banister TRIMP — each second weighted exponentially by heart-rate reserve,
+       so time near threshold counts for far more than recovery swimming.</div>
+   </div>
+   <div class="card"><h2>stroke mix (inferred)</h2>
+     ${Object.entries(d.stroke_mix_pct).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+       `<div class="zrow"><span style="width:120px">${k}</span>
+        <span class="ztrack"><i style="width:${v}%;background:var(--accent)"></i></span>
+        <span style="width:60px" class="dim">${v}%</span></div>`).join('')}
+     <div class="dim" style="font-size:12px;margin-top:10px">
+       ${d.implausible_reps} reps excluded from personal bests as turn-detection
+       artifacts.</div>
+   </div>`;
+}
+async function loadPRs(){
+  $('#main').innerHTML='<div class="card dim">loading…</div>';
+  const d=await (await fetch('/api/prs')).json();
+  const byDist={};
+  d.prs.forEach(p=>{ (byDist[p.yards]=byDist[p.yards]||[]).push(p); });
+  $('#main').innerHTML=`<div class="card">
+    <h2>personal bests by distance and stroke</h2>
+    <table><tr><th>distance</th><th>stroke</th><th>best</th><th>pace/25</th>
+      <th>date</th><th>attempts</th></tr>
+    ${Object.keys(byDist).sort((a,b)=>a-b).map(dist=>
+      byDist[dist].sort((a,b)=>a.seconds-b.seconds).map((p,i)=>`<tr>
+        <td>${i===0?`<b>${p.yards} yd</b>`:''}</td>
+        <td>${p.stroke}</td>
+        <td><b>${fmtTime(p.seconds)}</b></td>
+        <td class="dim">${p.pace_per_25.toFixed(1)}s</td>
+        <td class="dim">${p.date}</td>
+        <td class="dim">${p.n_attempts}</td></tr>`).join('')).join('')}
+    </table>
+    <div class="dim" style="font-size:12px;margin-top:12px">
+      Stroke is inferred from pace and heart rate, not measured, so a best is
+      provisional. Reps faster than 65% of the median pace are excluded as
+      turn-detection artifacts.</div>
+  </div>`;
+}
 async function loadReport(){
   const q=new URLSearchParams();
   if($('#from').value)q.set('from',$('#from').value);
@@ -257,6 +349,7 @@ def create_app(db_url=None) -> Flask:
         return jsonify(
             hr_max=ref.hr_max,
             zones=ref.zone_bounds(),
+            effort=ref.effort_score(wid),
             header={"date": head["start_time"][:16],
                     "yards": round((head["distance_m"] or 0) / 0.9144),
                     "duration": _fmt(head["duration_s"]), "avg_hr": head["avg_hr"]},
@@ -296,6 +389,14 @@ def create_app(db_url=None) -> Flask:
             return jsonify(text=out.text, model=out.model)
         except ai.AIError as e:
             return jsonify(text=f"AI review unavailable: {e}", model="error")
+
+    @app.get("/api/summary")
+    def summary_tab():
+        return jsonify(report.overall_summary(engine, _reference()))
+
+    @app.get("/api/prs")
+    def prs_tab():
+        return jsonify(prs=report.personal_bests(engine, _reference()))
 
     @app.get("/api/report")
     def rep():

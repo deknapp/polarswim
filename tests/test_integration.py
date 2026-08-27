@@ -193,3 +193,52 @@ class TestImageExport:
         assert "download image for Strava" in page
         assert "function downloadImage" in page
         assert "toBlob" in page          # the canvas rasterisation path
+
+
+class TestSummaryAndPRTabs:
+    @pytest.fixture(scope="class")
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    def test_summary_reports_totals_and_heart_rate(self, client):
+        d = client.get("/api/summary").get_json()
+        assert d["workouts"] >= 5 and d["yards"] > 0 and d["lengths"] > 0
+        assert d["hr_max"] > 100 >= 0
+        assert d["hr_mean"] <= d["hr_p95"] <= d["hr_max"]
+
+    def test_summary_zone_time_covers_every_sample(self, client):
+        d = client.get("/api/summary").get_json()
+        assert len(d["zone_time"]) == 5
+        assert sum(z["seconds"] for z in d["zone_time"]) == pytest.approx(
+            d["hr_samples"], rel=0.01)
+        assert sum(z["pct"] for z in d["zone_time"]) == pytest.approx(100, abs=0.5)
+
+    def test_summary_reports_training_load(self, client):
+        d = client.get("/api/summary").get_json()
+        assert d["total_trimp"] > 0 and d["mean_trimp"] > 0
+
+    def test_personal_bests_are_listed_per_distance_and_stroke(self, client):
+        prs = client.get("/api/prs").get_json()["prs"]
+        assert prs
+        keys = [(p["yards"], p["stroke"]) for p in prs]
+        assert len(keys) == len(set(keys)), "a distance/stroke pair appears twice"
+        for p in prs:
+            assert p["seconds"] > 0 and p["yards"] >= 25
+            assert p["n_attempts"] >= 1
+
+    def test_a_best_is_never_slower_than_its_own_pace_implies(self, client):
+        for p in client.get("/api/prs").get_json()["prs"]:
+            assert p["pace_per_25"] == pytest.approx(
+                p["seconds"] / (p["yards"] / 25.0), rel=0.02)
+
+    def test_workout_view_carries_both_effort_scores(self, client, workout_id):
+        e = client.get(f"/api/workout/{workout_id}").get_json()["effort"]
+        assert e and 0 <= e["score"] <= 100
+        if e.get("intensity") is not None:
+            assert 0 <= e["intensity"] <= 100
+
+    def test_page_offers_all_three_tabs(self, client):
+        page = client.get("/").get_data(as_text=True)
+        for token in ('data-tab="workouts"', 'data-tab="summary"',
+                      'data-tab="prs"', "function loadSummary", "function loadPRs"):
+            assert token in page, f"dashboard is missing {token}"

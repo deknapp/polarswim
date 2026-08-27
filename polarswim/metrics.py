@@ -9,12 +9,17 @@ formula or a population table, which matters more in swimming than in most sport
     running, would put every zone boundary too high. The reference used is the
     highest heart rate actually observed while swimming.
 
-  * **Speed.** A rep is ranked against this swimmer's other reps of the **same
-    distance** — "this 50 was faster than 62% of your 50s". Ranking within an
-    inferred stroke was tried first and rejected as circular: the classifier assigns
-    fast lengths to freestyle, so a percentile within freestyle largely re-expresses
-    the classifier's own threshold, and it collapsed every slow length to 0%.
-    Distance is measured rather than inferred, so it carries no such feedback.
+  * **Speed.** A rep is ranked against this swimmer's other reps of the same
+    **distance and stroke** — "this backstroke 50 was faster than 62% of your
+    backstroke 50s". Distance alone was tried first and is wrong: it ranks a
+    backstroke 100 against a field of mostly freestyle 100s, pushing every
+    non-freestyle set to the bottom regardless of how well it was swum.
+
+    Ranking within an inferred stroke is mildly circular — the classifier assigns
+    fast lengths to freestyle — but comparing strokes against each other is the
+    larger error, so stroke is used and the basis is reported. Where a
+    distance/stroke pair is too thin to rank, it falls back to distance alone and
+    says so, and where even that is too thin it reports nothing.
 
   * **Personal bests.** The fastest recorded time for a given distance and stroke.
     Two caveats are built in. Stroke labels are inferred rather than measured, so a
@@ -52,7 +57,16 @@ SPEED_COLORS = [
     (60, "#3ddc84"), (80, "#f0a848"), (95, "#f0645a"),
 ]
 
-MIN_OBSERVATIONS = 30      # below this a percentile is not worth reporting
+MIN_OBSERVATIONS = 30      # distance-only fallback needs this many reps
+MIN_OBSERVATIONS_STROKE = 15   # a distance/stroke pair is narrower, so accept fewer
+
+# Edwards TRIMP zone weights, kept for the time-in-zone breakdown.
+ZONE_WEIGHTS = {"Z1": 1, "Z2": 2, "Z3": 3, "Z4": 4, "Z5": 5}
+
+# Banister TRIMP weights each sample by heart-rate reserve, exponentially, so a
+# minute near threshold counts for far more than a minute in recovery. Preferred
+# over Edwards' linear 1-5 zone weights, and over integrating heart rate directly.
+BANISTER_A, BANISTER_B = 0.64, 1.92
 
 # A rep faster than this fraction of the swimmer's median pace is treated as a
 # turn-detection artifact rather than a swim. Nobody halves their own pace.
@@ -66,6 +80,13 @@ class SwimmerReference:
     hr_max: int
     pace_by_stroke: dict[str, np.ndarray] = field(default_factory=dict)
     rep_times_by_distance: dict[int, np.ndarray] = field(default_factory=dict)
+    rep_times_by_distance_stroke: dict[tuple[int, str], np.ndarray] = field(
+        default_factory=dict)
+    hr_rest: int = 60
+    trimp_by_workout: dict[int, float] = field(default_factory=dict)
+    trimp_sorted: np.ndarray = field(default_factory=lambda: np.array([]))
+    intensity_by_workout: dict[int, float] = field(default_factory=dict)
+    intensity_sorted: np.ndarray = field(default_factory=lambda: np.array([]))
     best_rep: dict[tuple[int, str], dict] = field(default_factory=dict)
     median_pace_s: float = 0.0
     implausible_reps: int = 0      # excluded from bests as sensor artifacts
@@ -95,24 +116,105 @@ class SwimmerReference:
                 "pct_max": round(100 * frac)}
 
     # --- speed --------------------------------------------------------------
-    def speed_percentile(self, yards: int, seconds: float) -> dict | None:
-        """How a rep ranks against the swimmer's other reps of the same distance.
+    def speed_percentile(self, yards: int, seconds: float,
+                         stroke: str | None = None) -> dict | None:
+        """How a rep ranks against comparable reps of the swimmer's own.
 
-        Reported as "faster than N% of your Xs", so higher is better even though
-        the underlying time is lower-is-faster. Returns None when that distance has
-        too little history to rank against, rather than inventing a number.
+        Prefers the same distance AND stroke; falls back to distance alone when
+        that pair is too thin, and reports which basis was used so the caller can
+        show it. Higher is better, even though the underlying time is
+        lower-is-faster.
         """
-        history = self.rep_times_by_distance.get(int(yards))
-        if (history is None or len(history) < MIN_OBSERVATIONS
-                or not np.isfinite(seconds)):
+        if not np.isfinite(seconds):
             return None
+
+        history, basis = None, None
+        if stroke:
+            candidate = self.rep_times_by_distance_stroke.get((int(yards), stroke))
+            if candidate is not None and len(candidate) >= MIN_OBSERVATIONS_STROKE:
+                history, basis = candidate, "stroke"
+        if history is None:
+            candidate = self.rep_times_by_distance.get(int(yards))
+            if candidate is not None and len(candidate) >= MIN_OBSERVATIONS:
+                history, basis = candidate, "distance"
+        if history is None:
+            return None
+
         pct = float((history > seconds).mean() * 100.0)    # invert: low time = fast
         colour = SPEED_COLORS[0][1]
         for threshold, c in SPEED_COLORS:
             if pct >= threshold:
                 colour = c
-        return {"percentile": round(pct), "color": colour,
-                "n": int(len(history)), "distance": int(yards)}
+        return {"percentile": round(pct), "color": colour, "n": int(len(history)),
+                "distance": int(yards), "basis": basis,
+                "stroke": stroke if basis == "stroke" else None}
+
+    # --- training load ------------------------------------------------------
+    def hr_reserve(self, hr_series: np.ndarray) -> np.ndarray:
+        """Fraction of heart-rate reserve used, clipped to a sane range."""
+        span = max(1.0, float(self.hr_max - self.hr_rest))
+        return np.clip((np.asarray(hr_series, dtype=float) - self.hr_rest) / span,
+                       0.0, 1.2)
+
+    def trimp(self, hr_series: np.ndarray, interval_s: float = 1.0) -> float:
+        """Banister TRIMP — accumulated load, weighting intensity exponentially.
+
+        Each sample contributes `x · a · e^(b·x)` where x is the fraction of heart
+        rate reserve in use. The exponential is what separates this from a plain
+        integral of heart rate: a minute at threshold is worth several minutes of
+        recovery swimming, which is what makes the number track how a session
+        actually felt.
+        """
+        if hr_series is None or len(hr_series) == 0:
+            return 0.0
+        x = self.hr_reserve(hr_series)
+        return float(np.sum(x * BANISTER_A * np.exp(BANISTER_B * x))
+                     * interval_s / 60.0)
+
+    def edwards_trimp(self, hr_series: np.ndarray, interval_s: float = 1.0) -> float:
+        """Zone-weighted load, kept for comparison against the Banister figure."""
+        if hr_series is None or len(hr_series) == 0:
+            return 0.0
+        total = 0.0
+        for name, lo, hi, _label, _c in ZONE_BANDS:
+            in_zone = ((hr_series >= lo * self.hr_max)
+                       & (hr_series < hi * self.hr_max)).sum()
+            total += (in_zone * interval_s / 60.0) * ZONE_WEIGHTS[name]
+        return float(total)
+
+    @staticmethod
+    def _pct_colour(pct: float) -> str:
+        colour = SPEED_COLORS[0][1]
+        for threshold, c in SPEED_COLORS:
+            if pct >= threshold:
+                colour = c
+        return colour
+
+    def effort_score(self, workout_id: int) -> dict | None:
+        """Two 0-100 scores, because "hard" is two different questions.
+
+        `load` is accumulated stress, so it grows with duration — a three-hour swim
+        outranks a sharp hour, correctly, because it is more total work. `intensity`
+        is load per minute, which is duration-independent and answers "how hard was
+        this while it lasted". The two rank the database quite differently, and
+        reporting only one of them would misrepresent half the sessions.
+
+        Both are percentiles against this swimmer's own history, so they stay
+        meaningful as fitness changes.
+        """
+        load = self.trimp_by_workout.get(int(workout_id))
+        if load is None or len(self.trimp_sorted) < 3:
+            return None
+        load_pct = float((self.trimp_sorted <= load).mean() * 100.0)
+
+        intensity = self.intensity_by_workout.get(int(workout_id))
+        out = {"score": round(load_pct), "trimp": round(load, 1),
+               "color": self._pct_colour(load_pct), "n": int(len(self.trimp_sorted))}
+        if intensity is not None and len(self.intensity_sorted) >= 3:
+            i_pct = float((self.intensity_sorted <= intensity).mean() * 100.0)
+            out.update(intensity=round(i_pct), trimp_per_min=round(intensity, 2),
+                       intensity_color=self._pct_colour(i_pct))
+        return out
 
     # --- personal bests -----------------------------------------------------
     def check_pr(self, yards: int, stroke: str, seconds: float,
@@ -171,10 +273,43 @@ def build_reference(engine: Engine, lengths_df: pd.DataFrame) -> SwimmerReferenc
             ref.rep_times_by_distance[int(yards)] = times
 
     for (yards, stroke), g in reps.groupby(["yards", "stroke"]):
+        times = np.sort(g["seconds"].to_numpy())
+        if len(times):
+            ref.rep_times_by_distance_stroke[(int(yards), str(stroke))] = times
+
+    for (yards, stroke), g in reps.groupby(["yards", "stroke"]):
         row = g.loc[g["seconds"].idxmin()]
         ref.best_rep[(int(yards), str(stroke))] = {
             "seconds": float(row["seconds"]),
             "workout_id": int(row["workout_id"]),
             "date": str(row["start"])[:10],
         }
+
+    _load_training_load(engine, ref)
     return ref
+
+
+def _load_training_load(engine: Engine, ref: SwimmerReference) -> None:
+    """Compute load and intensity for every workout with a heart-rate series."""
+    stmt = (sa.select(hr_samples.c.workout_id, hr_samples.c.hr)
+            .order_by(hr_samples.c.workout_id, hr_samples.c.t_s))
+    with engine.connect() as c:
+        df = pd.DataFrame(c.execute(stmt).mappings().all())
+    if df.empty:
+        return
+
+    # A true resting heart rate is not in the data, so the lowest sustained rate
+    # observed stands in for it. The 1st percentile rather than the minimum, since
+    # the minimum is usually a sensor dropout.
+    ref.hr_rest = int(np.percentile(df["hr"].to_numpy(dtype=float), 1))
+
+    for wid, g in df.groupby("workout_id"):
+        hr = g["hr"].to_numpy(dtype=float)
+        if len(hr) < 60:
+            continue
+        load = ref.trimp(hr)
+        ref.trimp_by_workout[int(wid)] = load
+        ref.intensity_by_workout[int(wid)] = load / (len(hr) / 60.0)
+
+    ref.trimp_sorted = np.sort(np.array(list(ref.trimp_by_workout.values())))
+    ref.intensity_sorted = np.sort(np.array(list(ref.intensity_by_workout.values())))

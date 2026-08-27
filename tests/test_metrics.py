@@ -120,3 +120,96 @@ class TestArtifactFiltering:
 
     def test_the_floor_is_relative_to_the_swimmer(self):
         assert metrics.PLAUSIBLE_FLOOR_RATIO < 1.0
+
+
+class TestTrainingLoad:
+    """Load and intensity answer different questions and must not be conflated."""
+
+    @pytest.fixture
+    def ref(self):
+        r = SwimmerReference(hr_max=172, hr_rest=79)
+        return r
+
+    def test_harder_work_scores_more_load_than_easier_work(self, ref):
+        easy = np.full(600, 100.0)
+        hard = np.full(600, 160.0)
+        assert ref.trimp(hard) > ref.trimp(easy)
+
+    def test_intensity_is_weighted_exponentially_not_linearly(self, ref):
+        """A minute at threshold must be worth well over a minute of recovery —
+        that is the whole reason for Banister over a plain heart-rate integral."""
+        recovery = ref.trimp(np.full(600, 95.0))
+        threshold = ref.trimp(np.full(600, 155.0))
+        linear_expectation = recovery * ((155 - 79) / (95 - 79))
+        assert threshold > linear_expectation
+
+    def test_longer_work_at_the_same_intensity_scores_more_load(self, ref):
+        assert ref.trimp(np.full(1200, 130.0)) > ref.trimp(np.full(600, 130.0))
+
+    def test_resting_heart_rate_contributes_nothing(self, ref):
+        assert ref.trimp(np.full(600, 79.0)) == pytest.approx(0.0, abs=1e-6)
+
+    def test_empty_series_is_zero(self, ref):
+        assert ref.trimp(np.array([])) == 0.0
+
+    def test_reserve_is_clipped_so_a_spike_cannot_explode_the_score(self, ref):
+        assert ref.hr_reserve(np.array([400.0]))[0] <= 1.2
+        assert ref.hr_reserve(np.array([10.0]))[0] == 0.0
+
+    def test_a_short_hard_swim_can_outscore_a_long_easy_one(self, ref):
+        """The exponential weighting is steep enough that intensity can beat
+        duration outright — 30 min at 155 bpm outweighs 2 h at 115 bpm."""
+        assert ref.trimp(np.full(1800, 155.0)) > ref.trimp(np.full(7200, 115.0))
+
+    def test_load_and_intensity_rank_differently(self, ref):
+        """Given enough duration, load still favours the long swim while intensity
+        favours the hard one. If the two agreed, one would be redundant."""
+        sessions = {
+            1: np.full(18000, 110.0),      # 5 h easy
+            2: np.full(1800, 160.0),       # 30 min hard
+            3: np.full(3600, 130.0),       # 1 h moderate
+        }
+        ref.trimp_by_workout = {k: ref.trimp(v) for k, v in sessions.items()}
+        ref.intensity_by_workout = {
+            k: ref.trimp(v) / (len(v) / 60) for k, v in sessions.items()}
+        ref.trimp_sorted = np.sort(np.array(list(ref.trimp_by_workout.values())))
+        ref.intensity_sorted = np.sort(
+            np.array(list(ref.intensity_by_workout.values())))
+        long_easy, short_hard = ref.effort_score(1), ref.effort_score(2)
+        assert long_easy["score"] > short_hard["score"]
+        assert short_hard["intensity"] > long_easy["intensity"]
+
+    def test_effort_needs_a_populated_database(self, ref):
+        assert ref.effort_score(1) is None
+
+
+class TestStrokeAwareSpeed:
+    """Ranking a backstroke 100 against mostly-freestyle 100s buries it."""
+
+    @pytest.fixture
+    def ref(self):
+        r = SwimmerReference(hr_max=172)
+        r.rep_times_by_distance = {100: np.sort(np.array([95.0 + i * 0.1
+                                                          for i in range(200)]))}
+        r.rep_times_by_distance_stroke = {
+            (100, "backstroke"): np.sort(np.array([125.0 + i * 0.2
+                                                   for i in range(40)])),
+            (100, "butterfly"): np.array([120.0, 122.0]),   # too thin
+        }
+        return r
+
+    def test_uses_the_stroke_when_it_has_enough_history(self, ref):
+        out = ref.speed_percentile(100, 128.0, "backstroke")
+        assert out["basis"] == "stroke" and out["stroke"] == "backstroke"
+
+    def test_stroke_ranking_is_fairer_than_distance_ranking(self, ref):
+        by_stroke = ref.speed_percentile(100, 128.0, "backstroke")["percentile"]
+        by_distance = ref.speed_percentile(100, 128.0)["percentile"]
+        assert by_stroke > by_distance
+
+    def test_falls_back_to_distance_when_the_stroke_is_thin(self, ref):
+        out = ref.speed_percentile(100, 121.0, "butterfly")
+        assert out["basis"] == "distance" and out["stroke"] is None
+
+    def test_reports_nothing_when_neither_has_history(self, ref):
+        assert ref.speed_percentile(400, 300.0, "freestyle") is None

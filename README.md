@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 191 tests, no network
+pytest -q                                                    # 211 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -121,6 +121,25 @@ key. It is built server-side as SVG and rasterised in the browser through a canv
 so it needs no plotting library and no external script. The SVG deliberately avoids
 `foreignObject` and any external reference, both of which taint a canvas and would
 make the export fail silently; a test enforces that.
+
+## Effort: two numbers, not one
+
+"How hard was that?" is two questions, and one number cannot answer both.
+
+**Load** is accumulated stress, so it grows with duration — a three-hour swim
+outranks a sharp hour, correctly, because it is more total work. **Intensity** is
+load per minute, duration-independent, and answers how hard it was while it lasted.
+On this database the two rank sessions completely differently: load picks the
+three-hour swims, intensity picks the ~1-hour sessions at 66% heart-rate reserve.
+Both are percentiles against the swimmer's own history, so they stay meaningful as
+fitness changes.
+
+The load model is **Banister TRIMP**: every second weighted by heart-rate reserve
+through . The exponential is the point. A plain integral of
+heart rate is linear, so it scores 30 minutes easy and 15 minutes hard about
+equally; Edwards' zone weights (1–5) are better but still linear. Under Banister,
+30 minutes at 155 bpm outweighs two hours at 115 bpm — which matches how those two
+sessions actually feel.
 
 ## Naming a workout
 

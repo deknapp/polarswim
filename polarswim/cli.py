@@ -145,14 +145,48 @@ def cmd_analyze(args) -> int:
 
 
 def cmd_card(args) -> int:
+    from . import metrics
     engine = db.connect(args.db)
     wid = resolve_workout(engine, args.workout)
     df = report.classified_lengths(engine, wid)
     if df.empty:
         print(f"no lengths for workout {wid}", file=sys.stderr)
         return 1
-    print(render.strava_block(df, _header(engine, wid)))
+    header = _header(engine, wid)
+    header.update(card_extras(engine, wid, df))
+    print(render.strava_block(df, header))
     return 0
+
+
+def card_extras(engine, workout_id: int, df) -> dict:
+    """Effort, per-workout time in zone, and any personal bests, for the card."""
+    import numpy as np
+    from . import metrics
+    from .models import hr_samples
+
+    ref = metrics.build_reference(engine, report.classified_lengths(engine))
+    with engine.connect() as c:
+        hr = np.array([r[0] for r in c.execute(
+            sa.select(hr_samples.c.hr)
+            .where(hr_samples.c.workout_id == workout_id)
+            .order_by(hr_samples.c.t_s))], dtype=float)
+
+    zone_time = []
+    for band in ref.zone_bounds():
+        seconds = int(((hr >= band["low"]) & (hr < band["high"])).sum()) if len(hr) else 0
+        if seconds:
+            zone_time.append({**band, "seconds": seconds,
+                              "pct": round(100 * seconds / max(1, len(hr)), 1)})
+
+    res = analyze.analyze(engine, workout_id=workout_id, persist=False)
+    sets = report.sets_for_workout(
+        df, {(r.workout_id, r.idx) for r in res.repairs}, ref)
+    prs = [f"{s['reps']}×{s['rep_yards']} {s['stroke']} "
+           f"{render._fmt_rep(s['rep_seconds'])}"
+           for s in sets if s.get("pr")]
+
+    return {"effort": ref.effort_score(workout_id), "zone_time": zone_time,
+            "prs": prs}
 
 
 def cmd_review(args) -> int:
