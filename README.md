@@ -18,11 +18,11 @@ pip install -r requirements.txt
 # Everything below runs against the committed sample database — no account needed.
 python -m polarswim --db sample/sample.db status
 python -m polarswim --db sample/sample.db analyze
-python -m polarswim --db sample/sample.db card 8432902372     # paste into Strava
+python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                     # 92 tests, no network
+pytest -q                                                    # 122 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -60,6 +60,33 @@ pace by length (taller = faster)
   1 ▅▅▅▅▅▄▅▆▅▃▁█▅▂▁▇▆▄▁▄▃█▃▆▃▄▃█▇▆
  31 █▃▃▂▄▄▆▅▇▄▇▅▅▃▄▃▄▄▄▃▄▄▇▄▄▁▇▄▂█
 ```
+
+## Naming a workout
+
+Commands that act on one session take a **date**, a Polar training id, or `latest` —
+nobody remembers a training id:
+
+```
+python -m polarswim card 2026-08-19
+python -m polarswim card latest
+python -m polarswim review 2026-08-19
+```
+
+Two swims on the same day makes the date ambiguous, so it lists the candidates
+instead of silently picking one.
+
+## Web UI
+
+```
+python -m polarswim serve
+```
+
+Then open **http://127.0.0.1:8770**. Swims are listed newest first; picking one shows
+a pace-per-length chart, a set-by-set table with **low-confidence stroke labels
+highlighted** so an estimate never reads as a measurement, a one-click copy of the
+Strava card, and the AI review. The date pickers run the season report over any
+range. It binds to localhost only — this is a personal tool over a personal
+database, not a service.
 
 ## Inferring stroke without labels
 

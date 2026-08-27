@@ -16,8 +16,8 @@ from polarswim import cli, spark
 
 ROOT = Path(__file__).resolve().parent.parent
 PLACEHOLDERS = {
-    "YYYY-MM-DD": "2026-01-01", "<workout_id>": "1", "<id>": "1", "ID": "1",
-    "N": "1", "...": "2026-01-01", "8770": "8770",
+    "YYYY-MM-DD": "2026-01-01", "<date|id|latest>": "latest", "<workout_id>": "1",
+    "<id>": "1", "ID": "1", "N": "1", "...": "2026-01-01", "8770": "8770",
 }
 
 
@@ -68,8 +68,14 @@ class TestParser:
         assert cli.build_parser().parse_args([cmd]).cmd == cmd
 
     @pytest.mark.parametrize("cmd", ["card", "review"])
-    def test_subcommand_requiring_a_workout_id(self, cmd):
-        assert cli.build_parser().parse_args([cmd, "42"]).workout_id == 42
+    @pytest.mark.parametrize("token", ["2026-08-19", "8432902372", "latest"])
+    def test_subcommand_accepts_any_workout_reference(self, cmd, token):
+        assert cli.build_parser().parse_args([cmd, token]).workout == token
+
+    @pytest.mark.parametrize("cmd", ["card", "review"])
+    def test_workout_reference_is_required(self, cmd):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args([cmd])
 
     def test_sync_flags(self):
         a = cli.build_parser().parse_args(
@@ -109,6 +115,63 @@ class TestDocumentationMatchesReality:
             except SystemExit:
                 failures.append(" ".join(argv))
         assert not failures, f"documented but unsupported: {failures}"
+
+
+class TestWorkoutResolution:
+    """A date is what a person remembers; the id is what the database shows."""
+
+    @pytest.fixture(scope="class")
+    def engine(self):
+        from polarswim import db
+        sample = ROOT / "sample" / "sample.db"
+        if not sample.exists():
+            pytest.skip("sample database absent")
+        return db.connect(sample)
+
+    @pytest.fixture(scope="class")
+    def known(self, engine):
+        from polarswim import report
+        row = report.workout_headers(engine).iloc[-1]
+        return int(row["id"]), str(row["start_time"])[:10]
+
+    def test_resolves_by_id(self, engine, known):
+        wid, _ = known
+        assert cli.resolve_workout(engine, str(wid)) == wid
+
+    def test_resolves_by_date(self, engine, known):
+        wid, date = known
+        assert cli.resolve_workout(engine, date) == wid
+
+    def test_latest_resolves_to_the_most_recent(self, engine, known):
+        wid, _ = known
+        assert cli.resolve_workout(engine, "latest") == wid
+        assert cli.resolve_workout(engine, "last") == wid
+
+    def test_unknown_date_explains_itself(self, engine):
+        with pytest.raises(SystemExit, match="no pool swim found"):
+            cli.resolve_workout(engine, "1999-01-01")
+
+    def test_unknown_id_explains_itself(self, engine):
+        with pytest.raises(SystemExit, match="no workout with id"):
+            cli.resolve_workout(engine, "999999")
+
+    def test_unparseable_token_suggests_the_valid_forms(self, engine):
+        with pytest.raises(SystemExit, match="2026-08-19"):
+            cli.resolve_workout(engine, "tuesday")
+
+
+class TestReadmeClaims:
+    """Numbers asserted in the README must match reality, or they will rot."""
+
+    def test_stated_test_count_is_accurate(self, pytestconfig):
+        import re as _re
+        readme = (ROOT / "README.md").read_text()
+        m = _re.search(r"#\s*(\d+) tests, no network", readme)
+        assert m, "README no longer states a test count in the quickstart block"
+        claimed = int(m.group(1))
+        actual = pytestconfig.pluginmanager.getplugin("terminalreporter")._numcollected
+        assert claimed == actual, (
+            f"README claims {claimed} tests; the suite collects {actual}")
 
 
 class TestSparkIsOptional:

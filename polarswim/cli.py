@@ -3,8 +3,12 @@
     polarswim sync [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N] [--force]
     polarswim status
     polarswim analyze [--workout ID]
-    polarswim card <workout_id>   Strava-pasteable Unicode card
-    polarswim review <workout_id>   AI review (needs ANTHROPIC_API_KEY)
+    polarswim card <date|id|latest>   Strava-pasteable Unicode card
+    polarswim review <date|id|latest>   AI review (needs ANTHROPIC_API_KEY)
+
+A workout is named by date (2026-08-19), by Polar's training id, or by `latest`.
+Dates are what a person actually remembers, so they are the intended form; the id
+is there because it is what the database and the web UI show.
     polarswim report [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]
     polarswim serve [--port 8770]   local web UI
     polarswim reparse
@@ -15,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 
 import sqlalchemy as sa
@@ -29,6 +34,49 @@ from .sync import sync_range
 
 def _date(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
+
+
+def resolve_workout(engine, token: str) -> int:
+    """Turn a date, a Polar training id, or `latest` into a workout id.
+
+    Nobody remembers a training id, so a date is the form a person will reach for.
+    An ambiguous date lists the candidates rather than silently picking one.
+    """
+    token = token.strip()
+
+    if token.lower() in ("latest", "last"):
+        heads = report.workout_headers(engine)
+        if heads.empty:
+            raise SystemExit("no pool swims stored — run `polarswim sync` first")
+        return int(heads.iloc[-1]["id"])
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+        with engine.connect() as c:
+            rows = c.execute(
+                sa.select(workouts.c.id, workouts.c.start_time, workouts.c.n_lengths)
+                .where(workouts.c.start_time.like(f"{token}%"))
+                .where(workouts.c.n_lengths > 0)
+                .order_by(workouts.c.start_epoch)).all()
+        if not rows:
+            raise SystemExit(f"no pool swim found on {token}")
+        if len(rows) > 1:
+            listing = "\n".join(
+                f"    {r.id}  {r.start_time[11:16]}  {r.n_lengths} lengths" for r in rows)
+            raise SystemExit(
+                f"{len(rows)} swims on {token} — name one by id:\n{listing}")
+        return int(rows[0].id)
+
+    if token.isdigit():
+        with engine.connect() as c:
+            hit = c.execute(sa.select(workouts.c.id)
+                            .where(workouts.c.id == int(token))).scalar()
+        if hit is None:
+            raise SystemExit(f"no workout with id {token} — try a date, or `latest`")
+        return int(hit)
+
+    raise SystemExit(
+        f"could not read {token!r} as a workout. Use a date (2026-08-19), "
+        "a Polar training id, or `latest`.")
 
 
 def _header(engine, workout_id: int) -> dict:
@@ -98,23 +146,25 @@ def cmd_analyze(args) -> int:
 
 def cmd_card(args) -> int:
     engine = db.connect(args.db)
-    df = report.classified_lengths(engine, args.workout_id)
+    wid = resolve_workout(engine, args.workout)
+    df = report.classified_lengths(engine, wid)
     if df.empty:
-        print(f"no lengths for workout {args.workout_id}", file=sys.stderr)
+        print(f"no lengths for workout {wid}", file=sys.stderr)
         return 1
-    print(render.strava_block(df, _header(engine, args.workout_id)))
+    print(render.strava_block(df, _header(engine, wid)))
     return 0
 
 
 def cmd_review(args) -> int:
     engine = db.connect(args.db)
-    df = report.classified_lengths(engine, args.workout_id)
+    wid = resolve_workout(engine, args.workout)
+    df = report.classified_lengths(engine, wid)
     if df.empty:
-        print(f"no lengths for workout {args.workout_id}", file=sys.stderr)
+        print(f"no lengths for workout {wid}", file=sys.stderr)
         return 1
-    res = analyze.analyze(engine, workout_id=args.workout_id, persist=False)
+    res = analyze.analyze(engine, workout_id=wid, persist=False)
     sets = report.sets_for_workout(df, {(r.workout_id, r.idx) for r in res.repairs})
-    header = _header(engine, args.workout_id)
+    header = _header(engine, wid)
 
     if not ai.available():
         print("(no ANTHROPIC_API_KEY found — offline summary)\n")
@@ -183,11 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
     an.set_defaults(func=cmd_analyze)
 
     cd = sub.add_parser("card", help="Unicode card to paste into Strava")
-    cd.add_argument("workout_id", type=int)
+    cd.add_argument("workout", metavar="date|id|latest",
+                    help="e.g. 2026-08-19, a Polar training id, or 'latest'")
     cd.set_defaults(func=cmd_card)
 
     rv = sub.add_parser("review", help="AI review of one workout")
-    rv.add_argument("workout_id", type=int)
+    rv.add_argument("workout", metavar="date|id|latest",
+                    help="e.g. 2026-08-19, a Polar training id, or 'latest'")
     rv.set_defaults(func=cmd_review)
 
     rp = sub.add_parser("report", help="summary over a date range")
