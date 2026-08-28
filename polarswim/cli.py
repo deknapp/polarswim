@@ -176,7 +176,12 @@ def cmd_card(args) -> int:
         return 1
     header = _header(engine, wid)
     header.update(card_extras(engine, wid, df))
-    print(render.strava_block(df, header))
+    # Build the rows with the swimmer's reference attached, or every zone and
+    # speed column on the card prints a dash — the card's whole point is now the
+    # columns, so rendering it without them is worse than the old bar.
+    ref = metrics.build_reference(engine, report.classified_lengths(engine))
+    sets = report.sets_for_workout(df, set(), ref)
+    print(render.strava_block(df, header, sets))
     return 0
 
 

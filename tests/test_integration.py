@@ -351,10 +351,14 @@ class TestCorrectionsTab:
                     json={"reps": {f"{multi['set_id']}:{last['rep_id']}": "breaststroke"}})
 
         after = client.get(f"/api/workout/{workout_id}").get_json()
-        row = next(s for s in after["sets"] if s["set_id"] == multi["set_id"])
-        assert row["reps_detail"][-1]["stroke"] == "breaststroke"
-        assert row["reps_detail"][0]["stroke"] != "breaststroke"
-        assert row["mixed"] is True
+        rows = [s for s in after["sets"] if s["set_id"] == multi["set_id"]]
+        # The set splits where the stroke changes, so the correction is visible
+        # as its own row rather than averaged into the majority label.
+        assert len(rows) == 2
+        assert rows[-1]["stroke"] == "breaststroke"
+        assert rows[-1]["reps"] == 1
+        assert rows[0]["stroke"] != "breaststroke"
+        assert all(r["split_from_set"] for r in rows)
 
     def test_an_interval_correction_to_IM_fills_in_the_stroke_order(
             self, client, workout_id):
@@ -379,13 +383,18 @@ class TestCorrectionsTab:
         acc = client.get(f"/api/labels/{workout_id}").get_json()["accuracy"]
         assert acc["accuracy"] is None
 
-    def test_a_uniform_set_is_not_flagged_mixed(self, client, workout_id):
-        """Mixed compares intervals, not lengths — one undetermined length in a
-        1250 means one unresolved length, not a set of two strokes."""
+    def test_a_row_only_ever_holds_one_stroke(self, client, workout_id):
+        """The whole point of splitting: a row is equal distance AND equal stroke,
+        so its label describes every interval under it."""
         d = client.get(f"/api/workout/{workout_id}").get_json()
         for s in d["sets"]:
-            strokes = {r["stroke"] for r in s["reps_detail"]}
-            assert s["mixed"] == (len(strokes) > 1)
+            assert {r["stroke"] for r in s["reps_detail"]} == {s["stroke"]}
+
+    def test_a_uniform_set_is_not_split(self, client, workout_id):
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        for s in d["sets"]:
+            if not s["split_from_set"]:
+                assert s["parts"] == 1
 
     def test_a_medley_interval_is_named_IM_not_its_first_leg(self, client):
         """Same four-way-tie trap as the set label, one level down."""

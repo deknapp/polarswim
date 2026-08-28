@@ -88,7 +88,6 @@ PAGE = """<!doctype html>
     <button class="tab on" data-tab="workouts" onclick="tab('workouts')">workouts</button>
     <button class="tab" data-tab="summary" onclick="tab('summary')">summary</button>
     <button class="tab" data-tab="prs" onclick="tab('prs')">personal bests</button>
-    <button class="tab" data-tab="fix" onclick="tab('fix')">corrections</button>
   </nav>
 </header>
 <div class="wrap"><aside id="list"></aside><main id="main"></main></div>
@@ -97,6 +96,11 @@ let swims=[],cur=null;
 const $=s=>document.querySelector(s);
 const fmtTime=s=>s<60?`${Math.round(s)}s`
   :`${Math.floor(s/60)}:${String(Math.round(s%60)).padStart(2,'0')}`;
+// A set split by a stroke change yields two rows sharing a set number, so they
+// get a letter: 8a is the four 50s free, 8b the three breast.
+const setLabel=s=>s.parts>1
+  ? `${s.set_id}${String.fromCharCode(96+s.part)}`
+  : `${s.set_id}`;
 async function boot(){
   const r=await (await fetch('/api/swims')).json();
   swims=r.swims; $('#sub').textContent=r.summary;
@@ -107,15 +111,34 @@ async function boot(){
 }
 async function pick(i){
   cur=swims[i];
-  if(document.querySelector('.tab.on')?.dataset.tab==='fix'){
-    fixWorkout=cur.id; loadFix(); return;
-  }
   document.querySelectorAll('.sw').forEach(e=>e.classList.remove('on'));
   $('#sw'+i).classList.add('on');
   $('#main').innerHTML='<div class="card dim">loading…</div>';
-  const d=await (await fetch('/api/workout/'+cur.id)).json();
-  const maxp=Math.max(...d.sets.map(s=>s.pace_s));
-  $('#main').innerHTML=`
+  curData=await (await fetch('/api/workout/'+cur.id)).json();
+  // Corrections are a view OF this workout, not a place of their own — keeping
+  // them as a top-level tab meant two independent selections of "which swim",
+  // and correcting one while looking at another.
+  showWorkoutTab(workoutTab);
+}
+
+let curData=null, workoutTab='analysis';
+
+function subnav(){
+  return `<div style="margin-bottom:14px">
+    ${['analysis','corrections'].map(t=>
+      `<button class="tab ${t===workoutTab?'on':''}"
+         onclick="showWorkoutTab('${t}')">${t}</button>`).join('')}
+  </div>`;
+}
+
+async function showWorkoutTab(name){
+  workoutTab=name;
+  if(name==='corrections'){ return loadFix(); }
+  renderAnalysis(curData);
+}
+
+function renderAnalysis(d){
+  $('#main').innerHTML=subnav()+`
    <div class="card"><b>${d.header.date}</b> · ${d.header.yards.toLocaleString()} yd ·
      ${d.header.duration} · avg ${d.header.avg_hr??'–'} bpm
      ${d.repairs?`<span class="lo"> · ${d.repairs} turn-detection defect(s) repaired</span>`:''}
@@ -133,7 +156,7 @@ async function pick(i){
      <div class="dim" style="font-size:12px">pace per length — taller is faster</div></div>
    <div class="card"><table><tr><th>set</th><th>reps</th><th>stroke</th><th>conf</th>
      <th>time</th><th>zone</th><th>speed</th><th>pace/50</th><th>rest</th><th></th></tr>
-     ${d.sets.map(s=>`<tr><td>${s.set_id}</td>
+     ${d.sets.map(s=>`<tr><td>${setLabel(s)}</td>
        <td><b>${s.reps}×${s.rep_yards}</b></td>
        <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
        <td>${s.confidence.toFixed(2)}</td>
@@ -234,7 +257,6 @@ function tab(name){
   document.querySelector('aside').style.display = name==='workouts'?'':'none';
   if(name==='workouts'){ cur?pick(swims.indexOf(cur)):pick(0); }
   else if(name==='summary') loadSummary();
-  else if(name==='fix') loadFix();
   else loadPRs();
 }
 async function loadSummary(){
@@ -345,16 +367,14 @@ function renderPRs(){
 }
 const FIX_STROKES=['freestyle','backstroke','breaststroke','butterfly','IM',
                    'other','undetermined'];
-let fixWorkout=null;
 
 async function loadFix(){
-  $('#main').innerHTML='<div class="card dim">loading…</div>';
-  document.querySelector('aside').style.display='';
-  fixWorkout = fixWorkout || (swims.length?swims[0].id:null);
-  if(!fixWorkout){ $('#main').innerHTML='<div class="card dim">no swims</div>'; return; }
+  if(!cur) return;
+  $('#main').innerHTML=subnav()+'<div class="card dim">loading…</div>';
   const [d,l] = await Promise.all([
-    (await fetch('/api/workout/'+fixWorkout)).json(),
-    (await fetch('/api/labels/'+fixWorkout)).json()]);
+    (await fetch('/api/workout/'+cur.id)).json(),
+    (await fetch('/api/labels/'+cur.id)).json()]);
+  curData=d;
   renderFix(d,l);
 }
 
@@ -364,7 +384,7 @@ function renderFix(d,l){
   const opts=(sel)=>FIX_STROKES.map(x=>
     `<option value="${x}" ${sel===x?'selected':''}>${x}</option>`).join('');
 
-  $('#main').innerHTML=`
+  $('#main').innerHTML=subnav()+`
    <div class="card">
      <h2>corrections — ${d.header.date}</h2>
      <div class="dim" style="font-size:12px;margin-bottom:12px">
@@ -380,7 +400,7 @@ function renderFix(d,l){
            <th>rest</th><th>your correction</th></tr>
      ${d.sets.map(s=>`
        <tr style="background:var(--bg)">
-         <td><b>set ${s.set_id}</b></td>
+         <td><b>set ${setLabel(s)}</b></td>
          <td><b>${s.reps}×${s.rep_yards}</b></td>
          <td class="${s.confidence<0.4?'lo':''}">${s.stroke}
            ${s.mixed?'<span class="dim">(mixed)</span>':''}</td>
@@ -446,7 +466,7 @@ async function saveFix(){
     reps[el.id.slice(2)] = el.value;      // "<set>:<rep>"
   });
   $('#fixnote').textContent='saving and re-analysing…';
-  const r=await (await fetch('/api/labels/'+fixWorkout,
+  const r=await (await fetch('/api/labels/'+cur.id,
     {method:'POST',headers:{'Content-Type':'application/json'},
      body:JSON.stringify({reps})})).json();
   $('#fixnote').textContent=`saved ${r.saved} lengths — model refitted`;

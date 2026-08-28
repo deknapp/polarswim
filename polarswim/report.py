@@ -67,28 +67,26 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
 
 def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = None,
                      ref=None) -> list[dict]:
-    """Collapse one workout's lengths into per-set rows."""
+    """Collapse one workout's lengths into rows of equal distance AND stroke.
+
+    A set is a run of equal-distance reps, which is not the same as a run of one
+    stroke: four 50s freestyle then three breaststroke is one set by that
+    definition. Reporting it as a single `7×50 freestyle` row is how a correction
+    to those last three could be saved, applied, and still appear to have done
+    nothing — the row it changed was averaging it away.
+
+    So a set is split wherever the stroke changes, into `4×50 free` and
+    `3×50 brst`. Rows keep their original `set_id` and carry a `part` index, so
+    the corrections editor can still group them back into the set they came from.
+    """
     repairs = repairs or set()
     out = []
     pool_yd = 25
     if "pool_m" in df.columns and df["pool_m"].notna().any():
         pool_yd = int(round(float(df["pool_m"].iloc[0]) / 0.9144))
+
     for sid, g in df.groupby("set_id"):
-        # A medley set has no single stroke: its lengths are one of each, so the
-        # mode is a four-way tie that pandas breaks alphabetically — which is how
-        # three 100 IMs came to be reported as 300 yards of backstroke, while the
-        # stroke mix beneath it correctly showed 75. Name it for what it is.
-        if "im_continuous" in g.columns and g["im_continuous"].all():
-            mode = pd.Series(["IM"])
-        else:
-            mode = g["predicted"].mode()
-        # Short-circuit on the empty case: the generator would otherwise read
-        # workout_id off every row just to test membership of an empty set, which
-        # needlessly requires a column a caller may not have.
-        note = "repaired" if repairs and any((r.workout_id, r.idx) in repairs
-                                             for r in g.itertuples()) else ""
-        reps = g.groupby("rep_id")
-        n_reps = reps.ngroups
+        reps = list(g.groupby("rep_id"))
         detail = [{
             "rep_id": int(rid),
             "seconds": float(r["duration_s"].sum()),
@@ -104,47 +102,61 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             "rest_before_s": float(r["rest_before_s"].iloc[0])
                              if "rest_before_s" in r.columns else 0.0,
         } for rid, r in reps]
-        out.append({
-            "set_id": int(sid),
-            "reps": int(n_reps),
-            "rep_yards": int(round(len(g) / n_reps)) * pool_yd,
-            "rep_seconds": float(reps["duration_s"].sum().median()),
-            "n": int(len(g)),
-            "stroke": mode.iloc[0] if len(mode) else "undetermined",
-            "confidence": float(g["confidence"].mean()),
-            "pace_s": float(g["pace_s"].median()),
-            # Per 50 for display: a 50 is the unit swimmers actually quote, and
-            # it makes a 100 set comparable with a 50 set at a glance.
-            "pace_50_s": float(reps["duration_s"].sum().median())
-                         / max(1e-9, (int(round(len(g) / n_reps)) * pool_yd) / 50.0),
-            "hr_cost": float(g["hr_cost"].mean()) if g["hr_cost"].notna().any() else 0.0,
-            # Optional: a caller may hand us a frame assembled without the set
-            # features, and a missing rest reads better as zero than as a crash.
-            "rest_before_s": (float(g["rest_before_s"].iloc[0])
-                              if "rest_before_s" in g.columns else 0.0),
-            "note": note,
-            # Every interval in the set, so a correction can name one of them.
-            # A set is a convenient default, not a claim that a swimmer held one
-            # stroke for all of it — "the last three of those 50s were breast" is
-            # an ordinary thing to have swum and has to be expressible.
-            "reps_detail": detail,
-            # Compared across INTERVALS, not lengths: one undetermined length in
-            # a 1250 does not make the set mixed, it makes one length unresolved.
-            "mixed": len({d["stroke"] for d in detail}) > 1,
-        })
-        if ref is not None:
-            row = out[-1]
-            mean_hr = ref.hr_max * 0 + _absolute_hr(g)
-            row["hr_zone"] = ref.hr_zone(mean_hr)
-            fastest = float(reps["duration_s"].sum().min())
-            median_rep = float(reps["duration_s"].sum().median())
-            row["speed"] = (ref.im_percentile(row["rep_yards"], median_rep)
-                            if row["stroke"] == "IM"
-                            else ref.speed_percentile(row["rep_yards"], median_rep,
-                                                      row["stroke"]))
-            row["pr"] = ref.check_pr(row["rep_yards"], row["stroke"], fastest,
-                                     int(g["workout_id"].iloc[0]))
-            row["best_rep_s"] = fastest
+
+        # Consecutive intervals of the same stroke become one row.
+        runs: list[list[dict]] = []
+        for d in detail:
+            if runs and runs[-1][0]["stroke"] == d["stroke"]:
+                runs[-1].append(d)
+            else:
+                runs.append([d])
+
+        for part, run in enumerate(runs, start=1):
+            rep_ids = [d["rep_id"] for d in run]
+            sub = g[g["rep_id"].isin(rep_ids)]
+            sub_reps = sub.groupby("rep_id")
+            n_reps = len(run)
+            rep_yards = run[0]["yards"]
+            rep_seconds = float(sub_reps["duration_s"].sum().median())
+            note = "repaired" if repairs and any((r.workout_id, r.idx) in repairs
+                                                 for r in sub.itertuples()) else ""
+            row = {
+                "set_id": int(sid),
+                "part": part,
+                "parts": len(runs),
+                "reps": n_reps,
+                "rep_yards": rep_yards,
+                "rep_seconds": rep_seconds,
+                "n": int(len(sub)),
+                "stroke": run[0]["stroke"],
+                "confidence": float(sub["confidence"].mean()),
+                "pace_s": float(sub["pace_s"].median()),
+                # Per 50 for display: a 50 is the unit swimmers actually quote,
+                # and it makes a 100 set comparable with a 50 set at a glance.
+                "pace_50_s": rep_seconds / max(1e-9, rep_yards / 50.0),
+                "hr_cost": (float(sub["hr_cost"].mean())
+                            if sub["hr_cost"].notna().any() else 0.0),
+                # Optional: a caller may hand us a frame assembled without the set
+                # features, and a missing rest reads better as zero than a crash.
+                "rest_before_s": (float(sub["rest_before_s"].iloc[0])
+                                  if "rest_before_s" in sub.columns else 0.0),
+                "note": note,
+                "reps_detail": run,
+                # Kept so a caller can tell a split row from a whole set without
+                # comparing counts.
+                "split_from_set": len(runs) > 1,
+            }
+            if ref is not None:
+                row["hr_zone"] = ref.hr_zone(_absolute_hr(sub))
+                fastest = float(sub_reps["duration_s"].sum().min())
+                row["speed"] = (ref.im_percentile(rep_yards, rep_seconds)
+                                if row["stroke"] == "IM"
+                                else ref.speed_percentile(rep_yards, rep_seconds,
+                                                          row["stroke"]))
+                row["pr"] = ref.check_pr(rep_yards, row["stroke"], fastest,
+                                         int(sub["workout_id"].iloc[0]))
+                row["best_rep_s"] = fastest
+            out.append(row)
     return out
 
 
