@@ -83,6 +83,7 @@ class AnalysisResult:
     predictions: list[dict] = field(default_factory=list)
     params: dict[str, dict[str, float]] = field(default_factory=dict)
     repairs: list[Repair] = field(default_factory=list)
+    im_rounds: list["IMRound"] = field(default_factory=list)
     n_lengths: int = 0
 
     def counts(self) -> dict[str, int]:
@@ -446,6 +447,145 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
     return df
 
 
+# --- individual medley ------------------------------------------------------
+# An IM is the one place where stroke order is known rather than inferred: fly,
+# back, breast, free, always in that order. That turns it into a STRUCTURAL
+# signal, which is far more reliable here than the per-length classifier — we do
+# not need to name each stroke, only to recognise the repeating four-part shape.
+IM_ORDER = ("butterfly", "backstroke", "breaststroke", "freestyle")
+IM_MIN_ROUNDS = 2          # one four-part round alone is not evidence; see below
+IM_SEPARATION = 1.5        # positions must differ more than they wobble
+IM_MIN_SPREAD = 0.08       # and differ by enough to not be a flat freestyle set
+# A medley covers all four strokes equally, which in a 25 yd pool makes exactly
+# three distances. Four 75s share the period-4 shape but total 300, which is not
+# an event anyone swims, so requiring a real distance rejects a whole class of
+# coincidental matches at no cost.
+IM_DISTANCES_YD = (100, 200, 400)
+
+
+@dataclass
+class IMRound:
+    """One complete fly-back-breast-free cycle."""
+    workout_id: int
+    set_id: int
+    round_no: int
+    yards: int
+    seconds: float                  # swim time; excludes rest inside a broken round
+    continuous: bool                # swum unbroken, or four reps off the wall
+    idxs: list[int] = field(default_factory=list)
+    splits_s: list[float] = field(default_factory=list)
+
+
+def _im_signature(values: np.ndarray) -> bool:
+    """Does a rounds x 4 matrix of times look like a repeated medley?
+
+    Two things have to hold at once. The four positions must be separated —
+    consistently different from each other across rounds, rather than wobbling
+    around one number, which is what tells a medley from a set of the same stroke.
+    And the fourth position must be the fastest, because freestyle comes last in
+    an IM and is the fastest stroke for anyone who would be swimming one.
+
+    Deliberately NOT checked: that the middle two are in any particular order.
+    Whether backstroke or breaststroke is the slower of them is a fact about the
+    individual swimmer, and assuming it is exactly the assumption this project
+    refuses to make elsewhere.
+    """
+    if values.shape[0] < IM_MIN_ROUNDS:
+        return False
+    means = values.mean(axis=0)
+    if means.min() <= 0 or means.argmin() != 3:
+        return False                              # freestyle is not the fastest leg
+    if (means.max() - means.min()) / means.mean() < IM_MIN_SPREAD:
+        return False                              # four legs too alike to be strokes
+    within = float(values.std(axis=0, ddof=0).mean())
+    between = float(means.std(ddof=0))
+    return between >= IM_SEPARATION * max(within, 1e-6)
+
+
+def detect_im(df: pd.DataFrame) -> list[IMRound]:
+    """Find medley rounds, continuous or broken into four reps.
+
+    Both shapes a swimmer actually writes down are recognised: `4x100 IM`, where
+    each rep is an unbroken medley, and `16x25 IM`, where the medley is broken
+    across four reps off the wall. In both cases the evidence is the same repeated
+    four-part structure, read at the level the repetition happens.
+
+    A SINGLE four-part round is not claimed. Four lengths that happen to descend
+    are indistinguishable from one medley on the evidence available, so at least
+    two rounds are required and a one-off IM is left unlabelled rather than
+    guessed at.
+    """
+    out: list[IMRound] = []
+    if df.empty:
+        return out
+
+    for (wid, sid), g in df.groupby(["workout_id", "set_id"]):
+        g = g.sort_values("idx")
+        pool_yd = float(g["pool_m"].iloc[0]) / 0.9144
+        reps = list(g.groupby("rep_id", sort=True))
+
+        # Continuous: every rep is itself a medley, so the four legs are lengths.
+        rep_lengths = {len(r) for _, r in reps}
+        uniform = len(rep_lengths) == 1
+        if uniform and len(reps) >= IM_MIN_ROUNDS:
+            n = next(iter(rep_lengths))
+            yards = int(round(n * pool_yd))
+            if n % 4 == 0 and yards in IM_DISTANCES_YD:
+                legs = n // 4          # lengths per stroke, 1 for a 100 in a 25 pool
+                matrix = np.array([
+                    r["duration_s"].to_numpy().reshape(4, legs).sum(axis=1)
+                    for _, r in reps])
+                if _im_signature(matrix):
+                    for i, (_, r) in enumerate(reps, start=1):
+                        out.append(IMRound(
+                            workout_id=int(wid), set_id=int(sid), round_no=i,
+                            yards=yards,
+                            seconds=float(r["duration_s"].sum()), continuous=True,
+                            idxs=[int(x) for x in r["idx"]],
+                            splits_s=[float(x) for x in matrix[i - 1]]))
+                    continue
+
+        # Broken: each rep is one leg, so four consecutive reps make a round.
+        if uniform and len(reps) >= 4 * IM_MIN_ROUNDS:
+            times = np.array([float(r["duration_s"].sum()) for _, r in reps])
+            n_rounds = len(times) // 4
+            matrix = times[:n_rounds * 4].reshape(n_rounds, 4)
+            rep_yd = int(round(len(reps[0][1]) * pool_yd))
+            if rep_yd * 4 in IM_DISTANCES_YD and _im_signature(matrix):
+                for i in range(n_rounds):
+                    members = reps[i * 4:(i + 1) * 4]
+                    out.append(IMRound(
+                        workout_id=int(wid), set_id=int(sid), round_no=i + 1,
+                        yards=rep_yd * 4, seconds=float(matrix[i].sum()),
+                        continuous=False,
+                        idxs=[int(x) for _, r in members for x in r["idx"]],
+                        splits_s=[float(x) for x in matrix[i]]))
+    return out
+
+
+def label_im(df: pd.DataFrame, rounds: list[IMRound]) -> pd.DataFrame:
+    """Overwrite predictions inside a medley round with the known stroke order.
+
+    Where a round is identified the strokes are no longer inferred — the order is
+    what makes it a medley — so these labels carry higher confidence than anything
+    the pace/cost rules produce.
+    """
+    if not rounds:
+        return df
+    df = df.copy()
+    labels: dict[tuple[int, int], str] = {}
+    for rnd in rounds:
+        per_leg = max(1, len(rnd.idxs) // 4)
+        for pos, stroke in enumerate(IM_ORDER):
+            for idx in rnd.idxs[pos * per_leg:(pos + 1) * per_leg]:
+                labels[(rnd.workout_id, idx)] = stroke
+    key = list(zip(df["workout_id"], df["idx"]))
+    hit = [k in labels for k in key]
+    df.loc[hit, "predicted"] = [labels[k] for k in key if k in labels]
+    df.loc[hit, "confidence"] = 0.85
+    return df
+
+
 def analyze(engine: Engine, workout_id: int | None = None,
             persist: bool = True) -> AnalysisResult:
     """Run the full analysis and, by default, persist model and predictions."""
@@ -477,6 +617,11 @@ def analyze(engine: Engine, workout_id: int | None = None,
     params = learn_params(full)
     df = classify(df, params)
 
+    # Medley rounds are recognised structurally, so their strokes are known rather
+    # than inferred and they overwrite whatever the pace/cost rules guessed.
+    im = detect_im(df)
+    df = label_im(df, im)
+
     kinds = {(r.workout_id, r.idx): r.kind for r in repairs}
     rows = [dict(workout_id=int(r.workout_id), idx=int(r.idx),
                  predicted=r.predicted, confidence=float(r.confidence),
@@ -491,4 +636,4 @@ def analyze(engine: Engine, workout_id: int | None = None,
         db.save_predictions(engine, rows)
 
     return AnalysisResult(predictions=rows, params=params, repairs=repairs,
-                          n_lengths=len(df))
+                          im_rounds=im, n_lengths=len(df))

@@ -51,7 +51,8 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     if params is None:
         from . import db
         params = db.load_model_params(engine) or analyze.learn_params(df)
-    return analyze.classify(df, params)
+    df = analyze.classify(df, params)
+    return analyze.label_im(df, analyze.detect_im(df))
 
 
 def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = None,

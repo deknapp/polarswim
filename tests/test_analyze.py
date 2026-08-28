@@ -293,3 +293,101 @@ class TestRestAndSetSizeInform_TheClassifier:
         big = analyze.classify(_featured([26] * 8), params)
         small = analyze.classify(_featured([26] * 2), params)
         assert small["confidence"].iloc[0] < big["confidence"].iloc[0]
+
+
+class TestMedleyDetection:
+    """An IM is the one place stroke order is known, so it is read structurally."""
+
+    @staticmethod
+    def _im_set(rounds=4, legs=(31, 28, 30, 24), gap=45):
+        """`rounds` continuous medleys, each one rep of four lengths."""
+        durations, gaps = [], []
+        for _ in range(rounds):
+            durations += list(legs)
+            gaps += [gap, 0, 0, 0]
+        return analyze.add_features(
+            analyze.assign_sets(_lengths(durations, gaps=gaps)), {})
+
+    def test_a_repeated_continuous_medley_is_found(self):
+        rounds = analyze.detect_im(self._im_set())
+        assert len(rounds) == 4
+        assert all(r.continuous for r in rounds)
+        assert {r.yards for r in rounds} == {100}
+
+    def test_the_round_time_is_the_sum_of_its_four_legs(self):
+        r = analyze.detect_im(self._im_set())[0]
+        assert r.seconds == pytest.approx(31 + 28 + 30 + 24)
+        assert r.splits_s == pytest.approx([31, 28, 30, 24])
+
+    def test_a_uniform_freestyle_set_is_not_a_medley(self):
+        """Four equal legs have no medley shape, however many times repeated."""
+        assert analyze.detect_im(self._im_set(legs=(26, 26, 26, 26))) == []
+
+    def test_free_must_be_the_fastest_leg(self):
+        """Freestyle comes last in an IM and is the fastest stroke for anyone
+        swimming one, so a set where it is not is some other kind of work."""
+        assert analyze.detect_im(self._im_set(legs=(24, 28, 30, 31))) == []
+
+    def test_the_middle_two_may_come_in_either_order(self):
+        """Whether back or breast is slower is a fact about the swimmer, and this
+        project does not assume it anywhere else either."""
+        back_slower = analyze.detect_im(self._im_set(legs=(31, 33, 28, 24)))
+        breast_slower = analyze.detect_im(self._im_set(legs=(31, 28, 33, 24)))
+        assert len(back_slower) == 4 and len(breast_slower) == 4
+
+    def test_a_single_round_is_not_claimed(self):
+        """Four lengths that descend are indistinguishable from one medley."""
+        assert analyze.detect_im(self._im_set(rounds=1)) == []
+
+    def test_a_broken_medley_across_four_reps_is_found(self):
+        """16x25 IM: the medley is broken, so each leg is its own rep."""
+        durations = [31, 28, 30, 24] * 4
+        df = analyze.add_features(
+            analyze.assign_sets(_lengths(durations, gaps=[20] * 16)), {})
+        rounds = analyze.detect_im(df)
+        assert len(rounds) == 4
+        assert all(not r.continuous for r in rounds)
+        assert {r.yards for r in rounds} == {100}
+
+    def test_a_broken_round_excludes_the_rest_between_its_legs(self):
+        durations = [31, 28, 30, 24] * 4
+        df = analyze.add_features(
+            analyze.assign_sets(_lengths(durations, gaps=[20] * 16)), {})
+        assert analyze.detect_im(df)[0].seconds == pytest.approx(113)
+
+    def test_a_longer_medley_uses_more_lengths_per_leg(self):
+        """A 200 IM in a 25 yd pool is two lengths of each stroke."""
+        legs = (31, 31, 28, 28, 30, 30, 24, 24)
+        durations, gaps = [], []
+        for _ in range(3):
+            durations += list(legs)
+            gaps += [45] + [0] * 7
+        df = analyze.add_features(
+            analyze.assign_sets(_lengths(durations, gaps=gaps)), {})
+        rounds = analyze.detect_im(df)
+        assert {r.yards for r in rounds} == {200}
+        assert rounds[0].splits_s == pytest.approx([62, 56, 60, 48])
+
+    def test_medley_labels_replace_the_inferred_ones(self):
+        df = self._im_set()
+        params = analyze.learn_params(df)
+        labelled = analyze.label_im(analyze.classify(df, params), analyze.detect_im(df))
+        first = labelled.sort_values("idx")["predicted"].tolist()[:4]
+        assert first == list(analyze.IM_ORDER)
+        assert labelled["confidence"].iloc[0] > 0.8
+
+    def test_lengths_outside_a_medley_keep_their_inferred_label(self):
+        df = self._im_set()
+        params = analyze.learn_params(df)
+        classified = analyze.classify(df, params)
+        labelled = analyze.label_im(classified, [])
+        assert labelled["predicted"].tolist() == classified["predicted"].tolist()
+
+    def test_four_seventy_fives_are_not_a_medley(self):
+        """The shape matches but 300 is not a medley distance, so it is rejected."""
+        durations = [31, 28, 30, 24] * 4          # three lengths per leg = 75 yd
+        blown = [d for d in durations for _ in range(3)]
+        gaps = [20 if i % 3 == 0 else 0 for i in range(len(blown))]
+        df = analyze.add_features(
+            analyze.assign_sets(_lengths(blown, gaps=gaps)), {})
+        assert all(r.yards in analyze.IM_DISTANCES_YD for r in analyze.detect_im(df))
