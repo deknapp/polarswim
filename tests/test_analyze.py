@@ -403,3 +403,59 @@ class TestMedleyDetection:
     def test_legs_that_barely_differ_are_not_called_a_medley(self):
         """Four strokes differ by much more than one stroke varies between rounds."""
         assert analyze.detect_im(self._im_set(legs=(27, 28, 27, 26))) == []
+
+
+class TestOneStrokePerUnbrokenSwim:
+    """A rep has no rest in it, and nobody changes stroke without a wall."""
+
+    @staticmethod
+    def _rep(labels, confidences=None, im=False):
+        n = len(labels)
+        return pd.DataFrame({
+            "workout_id": [1] * n, "rep_id": [1] * n, "idx": range(1, n + 1),
+            "set_id": [1] * n, "predicted": labels,
+            "confidence": confidences or [0.8] * n,
+            "im_continuous": [im] * n,
+        })
+
+    def test_a_stray_length_takes_the_strokes_of_the_swim_it_is_in(self):
+        """One butterfly length inside a continuous 1250 freestyle is not a
+        stroke change; it is a length that drifted into another cluster."""
+        df = self._rep(["freestyle"] * 47 + ["butterfly"] + ["undetermined"] * 2)
+        out = analyze.enforce_rep_consistency(df)
+        assert set(out["predicted"]) == {"freestyle"}
+
+    def test_an_already_consistent_rep_is_untouched(self):
+        df = self._rep(["freestyle"] * 8)
+        out = analyze.enforce_rep_consistency(df)
+        assert out["predicted"].tolist() == df["predicted"].tolist()
+        assert out["confidence"].tolist() == df["confidence"].tolist()
+
+    def test_a_medley_rep_keeps_its_four_strokes(self):
+        """Four strokes in one unbroken swim is exactly what an IM is."""
+        df = self._rep(list(analyze.IM_ORDER), im=True)
+        out = analyze.enforce_rep_consistency(df)
+        assert out["predicted"].tolist() == list(analyze.IM_ORDER)
+
+    def test_a_tie_goes_to_the_label_the_rules_were_surer_of(self):
+        df = self._rep(["freestyle", "freestyle", "butterfly", "butterfly"],
+                       confidences=[0.4, 0.4, 0.9, 0.9])
+        out = analyze.enforce_rep_consistency(df)
+        assert set(out["predicted"]) == {"butterfly"}
+
+    def test_confidence_reflects_how_much_of_the_rep_agreed(self):
+        """A rep where one length in ten disagreed is a weaker call than one
+        where every length agreed."""
+        clean = analyze.enforce_rep_consistency(self._rep(["freestyle"] * 10))
+        split = analyze.enforce_rep_consistency(
+            self._rep(["freestyle"] * 9 + ["butterfly"]))
+        assert split["confidence"].iloc[0] < clean["confidence"].iloc[0]
+
+    def test_reps_are_collapsed_independently_of_each_other(self):
+        a = self._rep(["freestyle"] * 3 + ["butterfly"])
+        b = self._rep(["breaststroke"] * 3 + ["freestyle"])
+        b["rep_id"] = 2
+        b["idx"] = range(5, 9)
+        out = analyze.enforce_rep_consistency(pd.concat([a, b], ignore_index=True))
+        assert set(out[out["rep_id"] == 1]["predicted"]) == {"freestyle"}
+        assert set(out[out["rep_id"] == 2]["predicted"]) == {"breaststroke"}

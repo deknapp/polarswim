@@ -62,6 +62,7 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     model = learn.from_params(params)
     if model.is_usable():
         df = learn.apply(df, model)
+    df = analyze.enforce_rep_consistency(df)
     return learn.apply_labels(df, db.load_labels(engine, workout_id))
 
 

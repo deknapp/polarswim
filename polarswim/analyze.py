@@ -577,6 +577,51 @@ def detect_im(df: pd.DataFrame) -> list[IMRound]:
     return out
 
 
+def enforce_rep_consistency(df: pd.DataFrame) -> pd.DataFrame:
+    """One unbroken swim is one stroke.
+
+    A rep is defined by having no rest in it, and a swimmer cannot change stroke
+    without stopping at a wall. So a single length called butterfly in the middle
+    of a continuous 1250 freestyle is not a stroke change — it is a length whose
+    pace and heart rate happened to drift into another cluster.
+
+    Left alone, those strays are invisible in the set table (which reports the
+    majority) and glaring in the stroke mix (which counts every length), so the
+    two disagree: one workout showed 175 yards of butterfly with no butterfly set
+    in it. Collapsing each rep to its majority makes the two views arithmetically
+    consistent, and removes a class of error the per-length rules cannot see
+    because they have no notion of "the swim this length belongs to".
+
+    Medley reps are exempt: four strokes in one unbroken swim is exactly what an
+    IM is, and it is identified structurally rather than from these labels.
+    """
+    if df.empty or "rep_id" not in df.columns:
+        return df
+    df = df.copy()
+    predicted = df["predicted"].to_numpy(dtype=object)
+    confidence = df["confidence"].to_numpy(dtype=float)
+
+    for _, g in df.groupby(["workout_id", "rep_id"], sort=False):
+        if "im_continuous" in g.columns and g["im_continuous"].any():
+            continue
+        if g["predicted"].nunique() <= 1:
+            continue
+        # Majority wins; a tie goes to whichever label the rules were surer of,
+        # which is the only further evidence available.
+        counts = g.groupby("predicted")["confidence"].agg(["size", "mean"])
+        winner = counts.sort_values(["size", "mean"], ascending=False).index[0]
+        rows = g.index.to_numpy()
+        positions = df.index.get_indexer(rows)
+        predicted[positions] = winner
+        # The rep is only as certain as the lengths that agreed on it.
+        confidence[positions] = float(counts.loc[winner, "mean"]
+                                      * counts.loc[winner, "size"] / len(g))
+
+    df["predicted"] = predicted
+    df["confidence"] = confidence.round(3)
+    return df
+
+
 def label_im(df: pd.DataFrame, rounds: list[IMRound]) -> pd.DataFrame:
     """Overwrite predictions inside a medley round with the known stroke order.
 
@@ -654,6 +699,9 @@ def analyze(engine: Engine, workout_id: int | None = None,
         if fitted.is_usable():
             params.update(fitted.as_params())
             df = learn.apply(df, fitted)
+    # After every automatic step and before the swimmer's own word: a rep is one
+    # stroke, but a correction may say otherwise and must still win.
+    df = enforce_rep_consistency(df)
     df = learn.apply_labels(df, labels)
 
     kinds = {(r.workout_id, r.idx): r.kind for r in repairs}

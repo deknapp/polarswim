@@ -28,7 +28,7 @@ polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
 polarswim --db sample/sample.db report --from 2026-08-01
 polarswim --db sample/sample.db serve                # web UI on :8770
 
-.venv/bin/pytest -q                                 # 312 tests, no network
+.venv/bin/pytest -q                                 # 318 tests, no network
 ```
 
 Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
@@ -256,6 +256,26 @@ rest being filed as drill, which is work misread as recovery.
 **Set size is not a fourth axis.** A set of one or two lengths has no usable median or
 spread, so every rule that reads a set statistic is reading noise there. Size does not
 name a stroke; it lowers the confidence attached to the call that used it.
+
+**One unbroken swim is one stroke.** A rep has no rest in it, and a swimmer
+cannot change stroke without stopping at a wall — so a single length called
+butterfly inside a continuous 1250 freestyle is not a stroke change, it is a
+length whose pace and heart rate drifted into another cluster. Each rep is
+therefore collapsed to its majority, medley reps excepted.
+
+The constraint was added after a card showed **175 yards of butterfly above a set
+table containing no butterfly set**: the table reports a set's majority and the
+stroke mix counts every length, so strays were invisible in one view and glaring
+in the other. Enforcing it makes the two arithmetically reconcile — a test now
+asserts they do — and removes a class of error the per-length rules cannot see,
+because they have no notion of the swim a length belongs to. Across this
+swimmer's history it moves freestyle from 63.7% to 75.0%; nearly all of that is
+long freestyle reps reabsorbing strays.
+
+The cost, stated plainly: a genuine medley swum only **once** is not detected
+structurally (two rounds are required) and will now be flattened to one stroke
+rather than showing four. Correcting that set is the fix, and it is exactly the
+kind of thing corrections exist for.
 
 **It says "undetermined".** Where the evidence doesn't separate two classes, that is
 the answer. On the full dataset 6% of lengths come back undetermined rather than

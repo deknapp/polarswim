@@ -443,3 +443,21 @@ class TestTheCardIsOneCard:
     def test_the_card_carries_the_effort_scores(self, client, workout_id):
         card = client.get(f"/api/workout/{workout_id}").get_json()["card"]
         assert "load" in card
+
+    def test_the_stroke_mix_reconciles_with_the_set_table(self, client, workout_id):
+        """The two views count the same swim: a set table with no butterfly set in
+        it cannot sit above a mix claiming 175 yards of butterfly."""
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        from_mix = {m["stroke"]: m["yards"] for m in d["mix"]}
+
+        from_sets: dict[str, int] = {}
+        for s in d["sets"]:
+            if s["stroke"] == "IM":
+                # A medley is four strokes in equal measure, by definition.
+                each = s["reps"] * s["rep_yards"] // 4
+                for leg in ("butterfly", "backstroke", "breaststroke", "freestyle"):
+                    from_sets[leg] = from_sets.get(leg, 0) + each
+            else:
+                from_sets[s["stroke"]] = (from_sets.get(s["stroke"], 0)
+                                          + s["reps"] * s["rep_yards"])
+        assert from_mix == from_sets
