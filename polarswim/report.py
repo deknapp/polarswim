@@ -64,9 +64,19 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
     if "pool_m" in df.columns and df["pool_m"].notna().any():
         pool_yd = int(round(float(df["pool_m"].iloc[0]) / 0.9144))
     for sid, g in df.groupby("set_id"):
-        mode = g["predicted"].mode()
-        note = "repaired" if any((r.workout_id, r.idx) in repairs
-                                 for r in g.itertuples()) else ""
+        # A medley set has no single stroke: its lengths are one of each, so the
+        # mode is a four-way tie that pandas breaks alphabetically — which is how
+        # three 100 IMs came to be reported as 300 yards of backstroke, while the
+        # stroke mix beneath it correctly showed 75. Name it for what it is.
+        if "im_continuous" in g.columns and g["im_continuous"].all():
+            mode = pd.Series(["IM"])
+        else:
+            mode = g["predicted"].mode()
+        # Short-circuit on the empty case: the generator would otherwise read
+        # workout_id off every row just to test membership of an empty set, which
+        # needlessly requires a column a caller may not have.
+        note = "repaired" if repairs and any((r.workout_id, r.idx) in repairs
+                                             for r in g.itertuples()) else ""
         reps = g.groupby("rep_id")
         n_reps = reps.ngroups
         out.append({
@@ -78,8 +88,15 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             "stroke": mode.iloc[0] if len(mode) else "undetermined",
             "confidence": float(g["confidence"].mean()),
             "pace_s": float(g["pace_s"].median()),
+            # Per 50 for display: a 50 is the unit swimmers actually quote, and
+            # it makes a 100 set comparable with a 50 set at a glance.
+            "pace_50_s": float(reps["duration_s"].sum().median())
+                         / max(1e-9, (int(round(len(g) / n_reps)) * pool_yd) / 50.0),
             "hr_cost": float(g["hr_cost"].mean()) if g["hr_cost"].notna().any() else 0.0,
-            "rest_before_s": float(g["rest_before_s"].iloc[0]),
+            # Optional: a caller may hand us a frame assembled without the set
+            # features, and a missing rest reads better as zero than as a crash.
+            "rest_before_s": (float(g["rest_before_s"].iloc[0])
+                              if "rest_before_s" in g.columns else 0.0),
             "note": note,
         })
         if ref is not None:
@@ -88,8 +105,10 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             row["hr_zone"] = ref.hr_zone(mean_hr)
             fastest = float(reps["duration_s"].sum().min())
             median_rep = float(reps["duration_s"].sum().median())
-            row["speed"] = ref.speed_percentile(row["rep_yards"], median_rep,
-                                                row["stroke"])
+            row["speed"] = (ref.im_percentile(row["rep_yards"], median_rep)
+                            if row["stroke"] == "IM"
+                            else ref.speed_percentile(row["rep_yards"], median_rep,
+                                                      row["stroke"]))
             row["pr"] = ref.check_pr(row["rep_yards"], row["stroke"], fastest,
                                      int(g["workout_id"].iloc[0]))
             row["best_rep_s"] = fastest
@@ -163,8 +182,16 @@ def overall_summary(engine: Engine, ref) -> dict:
 
     # Time in each zone across the whole database, at one sample per second.
     zone_time = []
-    for band in ref.zone_bounds():
+    bounds = ref.zone_bounds()
+    for i, band in enumerate(bounds):
         lo, hi = band["low"], band["high"]
+        # Zones start at resting heart rate, so anything below it belongs to the
+        # bottom band rather than to no band at all — otherwise the breakdown
+        # quietly loses the warm-up and stops summing to 100%.
+        if i == 0:
+            lo = 0
+        if i == len(bounds) - 1:
+            hi = max(hi, int(hr.max()) + 1) if len(hr) else hi
         seconds = int(((hr >= lo) & (hr < hi)).sum()) if len(hr) else 0
         zone_time.append({**band, "seconds": seconds,
                           "pct": round(100 * seconds / max(1, len(hr)), 1)})
@@ -211,7 +238,7 @@ def personal_bests(engine: Engine, ref) -> list[dict]:
             "yards": int(yards),
             "stroke": stroke,
             "seconds": round(best["seconds"], 1),
-            "pace_per_25": round(best["seconds"] / (yards / 25.0), 1),
+            "pace_per_50": round(best["seconds"] / (yards / 50.0), 1),
             "date": best["date"],
             "workout_id": int(best["workout_id"]),
             "n_attempts": int(len(ref.rep_times_by_distance_stroke.get(
@@ -226,7 +253,7 @@ def personal_bests(engine: Engine, ref) -> list[dict]:
             "yards": int(yards),
             "stroke": "IM",
             "seconds": round(best["seconds"], 1),
-            "pace_per_25": round(best["seconds"] / (yards / 25.0), 1),
+            "pace_per_50": round(best["seconds"] / (yards / 50.0), 1),
             "date": best["date"],
             "workout_id": int(best["workout_id"]),
             "n_attempts": int(best["n_rounds"]),

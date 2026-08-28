@@ -28,7 +28,7 @@ polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
 polarswim --db sample/sample.db report --from 2026-08-01
 polarswim --db sample/sample.db serve                # web UI on :8770
 
-.venv/bin/pytest -q                                 # 269 tests, no network
+.venv/bin/pytest -q                                 # 281 tests, no network
 ```
 
 Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
@@ -100,8 +100,16 @@ population table:
 **Heart-rate zone.** Anchored to the highest heart rate actually observed *while
 swimming* (172 bpm here). Maximum heart rate in water runs roughly 10–13 bpm below a
 land-based maximum — horizontal position, cooling water, less working muscle — so an
-age formula or a running max would place every boundary too high. Colour-coded, with
-the bpm ranges shown as a key.
+age formula or a running max would place every boundary too high.
+
+The five bands divide **heart-rate reserve** — resting to maximum, the Karvonen
+method — not zero to maximum. Dividing from zero measures against a heart rate
+nobody has: it put the bottom zone below 60% of max, which is unreachable in the
+water, so an easy swim reported as tempo and a steady aerobic set as threshold,
+a whole zone hot. Measured from resting (79 bpm here) the bands cover the range a
+swimmer actually occupies — Z1 79–135, Z5 163–172 — and Z5 becomes genuinely hard
+rather than merely brisk. It is also the scheme most training plans use, which
+matters for a number someone might compare against their own.
 
 **Relative speed.** A rep's percentile against this swimmer's own reps of the **same
 distance**. Ranking within an inferred stroke was tried and rejected as circular: the
@@ -123,12 +131,23 @@ detected splits are repaired rather than only dropped.
 Two outputs, because Strava takes two kinds of content:
 
 **The text card** (`polarswim card <date>`) pastes into an activity description.
-Plain text with coloured emoji, since that is all a description renders.
+Plain text with coloured emoji, since that is all a description renders. Each row
+carries what the dashboard table carries — effort zone, speed percentile, pace per
+50 — built from the same derivation, so the two cannot disagree.
+
+Two things it deliberately does not do. It draws **no pace bar**: the old one was
+scaled to the fastest and slowest length of that single workout, so four blocks
+meant nothing except "compared to the rest of today", and a shape with no scale is
+worse than a number. And it **labels its fields** rather than aligning them in
+columns — Strava renders descriptions in a proportional font, where padded columns
+drift out of line on a phone. Zones are drawn as circles and strokes as squares,
+because when both were squares a blue square meant freestyle in one column and Z2
+in the next.
 
 **The image** — the *download image for Strava* button in the dashboard — is the
 full analysis as a PNG you can attach to the activity as a photo: stroke-mix donut,
-per-set table with heart-rate zones, relative speed and personal bests, and the zone
-key. It is built server-side as SVG and rasterised in the browser through a canvas,
+per-set table with heart-rate zones, relative speed, pace per 50 and personal
+bests, a labelled header for every column, and a key explaining each one. It is built server-side as SVG and rasterised in the browser through a canvas,
 so it needs no plotting library and no external script. The SVG deliberately avoids
 `foreignObject` and any external reference, both of which taint a canvas and would
 make the export fail silently; a test enforces that.

@@ -21,6 +21,7 @@ from . import ai, analyze, db, image, metrics, render, report
 PIE_COLORS = {
     "freestyle": "#4aa3ff", "backstroke": "#3ddc84", "breaststroke": "#f0883e",
     "butterfly": "#bc7cff", "other": "#c9d1d9", "undetermined": "#6b7280",
+    "IM": "#f5d565",
 }
 
 PAGE = """<!doctype html>
@@ -126,7 +127,7 @@ async function pick(i){
    <div class="card"><svg id="spark" width="100%" height="90"></svg>
      <div class="dim" style="font-size:12px">pace per length — taller is faster</div></div>
    <div class="card"><table><tr><th>set</th><th>reps</th><th>stroke</th><th>conf</th>
-     <th>time</th><th>zone</th><th>speed</th><th>pace/25</th><th>rest</th><th></th></tr>
+     <th>time</th><th>zone</th><th>speed</th><th>pace/50</th><th>rest</th><th></th></tr>
      ${d.sets.map(s=>`<tr><td>${s.set_id}</td>
        <td><b>${s.reps}×${s.rep_yards}</b></td>
        <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
@@ -139,8 +140,7 @@ async function pick(i){
            background:${s.speed.color}"></i></span>
            <span class="dim">${s.speed.percentile}%</span>`
            :'<span class="dim">–</span>'}</td>
-       <td><span class="bar" style="width:${Math.round(45*(1-s.pace_s/maxp))+8}px"></span>
-           ${s.pace_s.toFixed(0)}s</td>
+       <td>${s.pace_50_s.toFixed(0)}s</td>
        <td>${s.rest_before_s.toFixed(0)}s</td>
        <td>${s.pr?'<span class="pr" title="fastest recorded at this distance and stroke">★ PR</span>':''}</td></tr>`).join('')}
    </table></div>
@@ -307,13 +307,13 @@ function renderPRs(){
      </nav>
      <h2>${PR_LABEL[prStroke]} — personal bests</h2>
      ${shown.length?`<table>
-       <tr><th>distance</th><th>best</th><th>pace/25</th>
+       <tr><th>distance</th><th>best</th><th>pace/50</th>
            ${isIM?'<th>splits <span class="dim">fly · back · breast · free</span></th><th>form</th>':''}
            <th>date</th><th>attempts</th></tr>
        ${shown.map(p=>`<tr>
          <td><b>${p.yards} yd</b></td>
          <td><b>${fmtTime(p.seconds)}</b></td>
-         <td class="dim">${p.pace_per_25.toFixed(1)}s</td>
+         <td class="dim">${p.pace_per_50.toFixed(1)}s</td>
          ${isIM?`<td class="dim">${(p.splits_s||[]).map(x=>x.toFixed(1)).join(' · ')}</td>
                  <td class="dim">${p.form||''}</td>`:''}
          <td class="dim">${p.date}</td>

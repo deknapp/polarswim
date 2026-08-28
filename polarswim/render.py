@@ -15,13 +15,17 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-WIDTH = 34                       # comfortable on a phone in the Strava app
+# A character budget, not a display width: the coloured squares are one character
+# each here but render double-width nearly everywhere, so the visual line is a
+# little wider than this number. Raised from 34 when each row gained its zone,
+# speed and pace fields — the old rows carried a bar and a time and nothing else.
+WIDTH = 42
 BLOCKS = "▁▂▃▄▅▆▇█"
 BAR = "▇"
 
 STROKE_GLYPH = {
     "freestyle": "free", "backstroke": "back", "breaststroke": "brst",
-    "butterfly": "fly ", "other": "drll", "undetermined": "  ? ",
+    "butterfly": "fly ", "other": "drll", "undetermined": "  ? ", "IM": "IM  ",
 }
 
 # Strava descriptions are plain text — no markdown, no HTML, no ANSI colour. Emoji
@@ -30,13 +34,15 @@ STROKE_GLYPH = {
 # exactly one appears per line: a uniform shift preserves the column alignment.
 STROKE_COLOR = {
     "freestyle": "🟦", "backstroke": "🟩", "breaststroke": "🟧",
-    "butterfly": "🟪", "other": "⬜", "undetermined": "⬛",
+    "butterfly": "🟪", "other": "⬜", "undetermined": "⬛", "IM": "🟨",
 }
 MIX_WIDTH = 12          # squares in the stacked bar; 12 keeps it inside a phone
 
 # Zone colours as emoji. Deliberately a different family from the stroke palette
 # where possible, and both bars are labelled, so the two are never confused.
-ZONE_COLOR = {"Z1": "⬜", "Z2": "🟦", "Z3": "🟩", "Z4": "🟧", "Z5": "🟥"}
+# Circles, not squares. The stroke palette is squares, and when both used them a
+# blue square meant freestyle in one column and Z2 in another.
+ZONE_COLOR = {"Z1": "⚪", "Z2": "🔵", "Z3": "🟢", "Z4": "🟠", "Z5": "🔴"}
 
 
 def _fmt_clock(seconds: float) -> str:
@@ -134,11 +140,25 @@ def zone_bar(zone_time: list[dict], width: int = MIX_WIDTH) -> str:
                    for k in order if k in counts)
 
 
-def set_card(df: pd.DataFrame, header: dict, hr_series=None) -> str:
+def set_card(df: pd.DataFrame, header: dict, sets: list[dict] | None = None,
+             hr_series=None) -> str:
     """Per-set summary card.
 
-    `df` is one workout's lengths with `set_id`, `pace_s`, `predicted`, and
-    (optionally) `hr_cost` already attached.
+    Rows are built from the same `sets_for_workout` derivation the dashboard
+    table uses, so the card cannot disagree with the screen it is meant to
+    mirror — which is how three 100 IMs once appeared as 300 yards of backstroke
+    in one place and 75 in another.
+
+    The old pace bar is gone. It was drawn relative to the fastest and slowest
+    length in that one workout, so it had no scale a reader could hold in their
+    head: four blocks meant nothing except "compared to the rest of today". The
+    columns that replaced it — effort zone, speed percentile, pace per 50 — each
+    mean something on their own.
+
+    Fields are separated by `·` rather than aligned in columns. Strava renders
+    descriptions in a proportional font, where space-padded columns drift out of
+    line on a phone, and a row that has drifted is unreadable in a way a row of
+    labelled fields is not.
     """
     lines: list[str] = []
     date = str(header.get("start_time", ""))[:10]
@@ -147,72 +167,76 @@ def set_card(df: pd.DataFrame, header: dict, hr_series=None) -> str:
     avg_hr = header.get("avg_hr")
 
     lines.append(f"🏊 {date}   {dist_yd:,} yd   {dur}")
-    second = f"   {len(df)} lengths" + (f"   ·   avg {avg_hr} bpm" if avg_hr else "")
+    second = f"   {len(df)} lengths" + (f" · avg {avg_hr} bpm" if avg_hr else "")
     effort = header.get("effort") or {}
     if effort.get("score") is not None:
-        second += f"   ·   load {effort['score']}"
+        second += f" · load {effort['score']}"
         if effort.get("intensity") is not None:
             second += f"/int {effort['intensity']}"
     lines.append(second)
 
-    bar = mix_bar(df)
-    if bar:
-        lines += ["", f"{bar}  stroke"]
-    zbar = zone_bar(header.get("zone_time") or [])
-    if zbar:
-        lines.append(f"{zbar}  HR zone")
-    lines.append("─" * (WIDTH - 2))
+    if sets is None:
+        sets = _sets(df, header)
 
-    paces = df["pace_s"].dropna()
-    lo, hi = (float(paces.min()), float(paces.max())) if len(paces) else (0.0, 1.0)
-    pool_yd = _pool_yards(header, df)
+    # Name the fields. Without this the card is five unlabelled numbers per row,
+    # which is the whole reason it was unreadable.
+    lines += ["", "set · time · zone · speed · pace/50"]
 
-    for sid, g in df.groupby("set_id"):
-        reps = g.groupby("rep_id")
-        n_reps = reps.ngroups
-        rep_yd = int(round(len(g) / n_reps)) * pool_yd
-        rep_time = float(reps["duration_s"].sum().median())
-        med = float(g["pace_s"].median())
-        mode = g["predicted"].mode()
-        key = mode.iloc[0] if len(mode) else "undetermined"
-        label = STROKE_GLYPH.get(key, "  ? ")
-        bar = _bar(med, lo, hi, 7)
-        lines.append(f"{STROKE_COLOR.get(key, '⬛')} {n_reps:>2}×{rep_yd:<4} {label} "
-                     f"{bar:<7} {_fmt_rep(rep_time):>5}")
+    for row in sets:
+        label = STROKE_GLYPH.get(row["stroke"], row["stroke"][:4]).strip()
+        square = STROKE_COLOR.get(row["stroke"], "⬛")
+        parts = [f"{square} {row['reps']}×{row['rep_yards']} {label}",
+                 _fmt_rep(row["rep_seconds"])]
+
+        zone = row.get("hr_zone")
+        parts.append(f"{ZONE_COLOR.get(zone['zone'], '⚪')}{zone['zone']}"
+                     if zone else "—")
+
+        speed = row.get("speed")
+        # A distance with too few comparable reps cannot be ranked honestly, so
+        # it says so rather than inventing a percentile.
+        parts.append(f"{speed['percentile']}%" if speed else "—")
+        parts.append(f"{row['pace_50_s']:.0f}s")
+
+        line = " · ".join(parts)
+        if row.get("pr"):
+            line += " ★"
+        lines.append(line)
 
     return "\n".join(lines)
 
 
-def length_chart(df: pd.DataFrame, per_row: int = 30) -> str:
-    """Every length as one glyph — the shape of the whole practice."""
-    paces = df.sort_values("idx")["pace_s"].to_numpy()
-    rows = []
-    for start in range(0, len(paces), per_row):
-        chunk = paces[start:start + per_row]
-        rows.append(f"{start + 1:>3} {sparkline(chunk, invert=True)}")
-    return "\n".join(rows)
+def _sets(df: pd.DataFrame, header: dict) -> list[dict]:
+    """Fall back to deriving the set rows when the caller has none to hand."""
+    from . import report
+    return report.sets_for_workout(df)
 
 
-def strava_block(df: pd.DataFrame, header: dict) -> str:
-    """The full paste-ready block: card, length chart, and a stroke tally."""
-    parts = [set_card(df, header), "", "pace by length (taller = faster)",
-             length_chart(df)]
+def strava_block(df: pd.DataFrame, header: dict,
+                 sets: list[dict] | None = None) -> str:
+    """The full paste-ready block: the set table, then the two keys it needs.
 
-    prs = header.get("prs") or []
-    if prs:
-        parts += [""] + [f"★ PR  {p}" for p in prs]
+    The per-length sparkline that used to sit under the table is gone for the
+    same reason as the pace bar — it was a shape with no scale. Everything left
+    here is either a number or the key to reading one.
+    """
+    parts = [set_card(df, header, sets)]
 
+    # Stroke colours, doubling as the distance breakdown.
     legend = mix_legend(df)
     if legend:
         parts += [""] + legend
 
     zone_time = header.get("zone_time") or []
-    if zone_time:
-        active = [z for z in zone_time if z.get("seconds")]
-        if active:
-            parts += ["", "  ".join(
-                f"{ZONE_COLOR.get(z['zone'], '⬜')}{z['zone']} {z['pct']:.0f}%"
-                for z in active)]
+    active = [z for z in zone_time if z.get("seconds")]
+    if active:
+        parts += ["", "  ".join(
+            f"{ZONE_COLOR.get(z['zone'], '⚪')}{z['zone']} {z['pct']:.0f}%"
+            for z in active)]
+    else:
+        parts += ["", "  ".join(f"{c}{z}" for z, c in ZONE_COLOR.items())]
+    parts += ["speed = your own percentile at that distance",
+              "★ = personal best"]
 
     parts += ["", "— polarswim"]
     return "\n".join(parts)

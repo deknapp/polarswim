@@ -10,7 +10,9 @@ from polarswim.metrics import SwimmerReference
 
 @pytest.fixture
 def ref():
-    r = SwimmerReference(hr_max=172, median_pace_s=26.0)
+    # rest 79 / max 172 is this swimmer's real pair, so the boundaries below are
+    # the ones the app actually shows.
+    r = SwimmerReference(hr_max=172, median_pace_s=26.0, hr_rest=79)
     r.rep_times_by_distance = {
         50: np.sort(np.array([50.0 + i * 0.1 for i in range(100)])),
         25: np.sort(np.array([24.0 + i * 0.1 for i in range(100)])),
@@ -21,13 +23,19 @@ def ref():
 
 
 class TestHeartRateZones:
-    """Zones are anchored to the observed swim maximum, not a formula."""
+    """Zones divide the range between resting and maximum, not zero and maximum."""
 
-    def test_zone_boundaries_scale_with_the_swimmers_max(self, ref):
+    def test_zones_span_resting_to_observed_max(self, ref):
         bounds = ref.zone_bounds()
-        assert bounds[0]["low"] == 0
-        assert bounds[-1]["high"] == 172
+        assert bounds[0]["low"] == 79          # resting, not zero
+        assert bounds[-1]["high"] == 172       # the observed swim maximum
         assert [z["zone"] for z in bounds] == ["Z1", "Z2", "Z3", "Z4", "Z5"]
+
+    def test_the_bottom_zone_is_reachable_in_the_water(self, ref):
+        """Measured from zero, Z1 ended at 60% of max — a heart rate no swimmer
+        holds while swimming, so easy work was landing two zones high."""
+        z1 = ref.zone_bounds()[0]
+        assert z1["high"] > 0.6 * ref.hr_max
 
     def test_zones_are_contiguous(self, ref):
         bounds = ref.zone_bounds()
@@ -35,7 +43,8 @@ class TestHeartRateZones:
             assert lower["high"] == upper["low"]
 
     @pytest.mark.parametrize("bpm,zone", [
-        (80, "Z1"), (110, "Z2"), (130, "Z3"), (145, "Z4"), (165, "Z5"), (172, "Z5"),
+        (80, "Z1"), (110, "Z1"), (130, "Z1"), (140, "Z2"), (148, "Z3"),
+        (158, "Z4"), (165, "Z5"), (172, "Z5"),
     ])
     def test_heart_rate_maps_to_the_right_zone(self, ref, bpm, zone):
         assert ref.hr_zone(bpm)["zone"] == zone
@@ -213,3 +222,31 @@ class TestStrokeAwareSpeed:
 
     def test_reports_nothing_when_neither_has_history(self, ref):
         assert ref.speed_percentile(400, 300.0, "freestyle") is None
+
+
+class TestMedleyRanking:
+    """A 100 IM belongs beside other 100 IMs."""
+
+    def test_a_medley_is_ranked_against_medleys(self):
+        r = SwimmerReference(hr_max=172, hr_rest=79)
+        r.im_times_by_distance = {100: np.sort(np.array([95.0, 100.0, 105.0, 110.0]))}
+        assert r.im_percentile(100, 96.0)["percentile"] == 75
+        assert r.im_percentile(100, 96.0)["basis"] == "medley"
+
+    def test_too_few_medleys_ranks_nothing(self):
+        r = SwimmerReference(hr_max=172, hr_rest=79)
+        r.im_times_by_distance = {100: np.array([95.0, 100.0])}
+        assert r.im_percentile(100, 96.0) is None
+
+    def test_a_medley_never_falls_back_to_the_freestyle_field(self):
+        """The generic path would rank a 100 IM against 100 frees, where every
+        medley lands near the bottom however well it was swum."""
+        r = SwimmerReference(hr_max=172, hr_rest=79)
+        r.rep_times_by_distance = {100: np.sort(np.arange(60.0, 90.0))}
+        assert r.im_percentile(100, 105.0) is None
+
+
+class TestCompetitiveDistances:
+    def test_medley_only_has_its_three_real_distances(self):
+        assert metrics.is_competitive(400, "IM")
+        assert not metrics.is_competitive(75, "IM")

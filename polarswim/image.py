@@ -32,6 +32,7 @@ PR_GOLD = "#f0a848"
 STROKE_LABEL = {
     "freestyle": "free", "backstroke": "back", "breaststroke": "breast",
     "butterfly": "fly", "other": "drill/kick", "undetermined": "unknown",
+    "IM": "IM",
 }
 
 
@@ -119,8 +120,8 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
     # --- table header
     y = HEAD_H - 22
     cols = [(PAD, "set"), (PAD + 120, "stroke"), (PAD + 280, "time"),
-            (PAD + 390, "zone"), (PAD + 530, "speed"), (PAD + 720, "pace/25"),
-            (PAD + 900, "rest")]
+            (PAD + 390, "effort zone"), (PAD + 530, "speed vs your own"),
+            (PAD + 720, "pace / 50"), (PAD + 900, "rest")]
     for x, label in cols:
         o.append(f'<text x="{x}" y="{y}" fill="{DIM}" font-size="14" '
                  f'letter-spacing="1">{label.upper()}</text>')
@@ -128,8 +129,6 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
              f'stroke="{LINE}" stroke-width="1"/>')
 
     # --- rows
-    paces = [s["pace_s"] for s in sets if s.get("pace_s")]
-    slowest = max(paces) if paces else 1.0
     y = HEAD_H + 18
     for i, s in enumerate(sets):
         if i % 2 == 0:
@@ -164,12 +163,13 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
             o.append(f'<text x="{PAD + 650}" y="{y}" fill="{DIM}" font-size="14">'
                      f'{speed["percentile"]}%</text>')
 
-        pace = s.get("pace_s") or 0
-        bar_w = max(6, 70 * (1 - pace / slowest) + 8)
-        o.append(f'<rect x="{PAD + 720}" y="{y - 12}" width="{bar_w:.0f}" height="10" '
-                 f'rx="5" fill="{ACCENT}" opacity="0.75"/>')
-        o.append(f'<text x="{PAD + 800}" y="{y}" fill="{DIM}" font-size="14">'
-                 f'{pace:.0f}s</text>')
+        # The pace bar is gone: it was scaled to the slowest set of that one
+        # workout, so its length meant nothing outside the image it was drawn in.
+        # The speed bar above it survives because a percentile has a real 0-100
+        # scale that reads the same on every card.
+        pace50 = s.get("pace_50_s") or 0
+        o.append(f'<text x="{PAD + 720}" y="{y}" fill="{FG}" font-size="17">'
+                 f'{pace50:.0f}s</text>')
         o.append(f'<text x="{PAD + 900}" y="{y}" fill="{DIM}" font-size="15">'
                  f'{s.get("rest_before_s", 0):.0f}s</text>')
         if s.get("pr"):
@@ -188,9 +188,14 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
         o.append(f'<text x="{x + 32}" y="{fy}" fill="{DIM}" font-size="13">'
                  f'{z["low"]}-{z["high"]}</text>')
         x += 118
+    notes = ("speed = percentile against your own reps at that distance and "
+             "stroke · pace / 50 = time normalised to 50 yd · ★ = personal best")
     o.append(f'<text x="{PAD}" y="{fy + 26}" fill="{DIM}" font-size="12">'
-             f'stroke inferred from pace and heart rate — not measured by the '
-             f'sensor · polarswim</text>')
+             f'{_esc(notes)}</text>')
+    o.append(f'<text x="{PAD}" y="{fy + 44}" fill="{DIM}" font-size="12">'
+             f'stroke inferred from pace, heart rate and rest — not measured by '
+             f'the sensor. IM sets are identified by their structure · '
+             f'polarswim</text>')
 
     o.append("</svg>")
     return "".join(o)

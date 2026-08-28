@@ -228,8 +228,8 @@ class TestSummaryAndPRTabs:
 
     def test_a_best_is_never_slower_than_its_own_pace_implies(self, client):
         for p in client.get("/api/prs").get_json()["prs"]:
-            assert p["pace_per_25"] == pytest.approx(
-                p["seconds"] / (p["yards"] / 25.0), rel=0.02)
+            assert p["pace_per_50"] == pytest.approx(
+                p["seconds"] / (p["yards"] / 50.0), rel=0.02)
 
     def test_workout_view_carries_both_effort_scores(self, client, workout_id):
         e = client.get(f"/api/workout/{workout_id}").get_json()["effort"]
@@ -289,7 +289,7 @@ class TestPersonalBestsPage:
         assert medley[0]["splits_s"] == [28.8, 23.2, 24.0, 16.8]
         assert medley[0]["form"] == "continuous"
         assert medley[0]["competitive"] is True
-        assert medley[0]["pace_per_25"] == pytest.approx(23.2)
+        assert medley[0]["pace_per_50"] == pytest.approx(46.4)
 
     def test_a_single_stroke_best_has_no_medley_fields(self, client):
         prs = client.get("/api/prs").get_json()["prs"]

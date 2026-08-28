@@ -53,6 +53,8 @@ def test_set_row_colour_matches_its_stroke(one_workout):
 
 
 def test_card_fits_a_phone(one_workout):
+    """Each row carries five labelled fields now, so the budget is wider than the
+    old bar-only card — but it still has to fit a phone without wrapping."""
     for line in render.set_card(one_workout, HEADER).splitlines():
         assert len(line) <= render.WIDTH
 
@@ -162,3 +164,50 @@ def test_mix_handles_a_single_stroke_workout():
     mix = render.stroke_mix(df)
     assert len(mix) == 1 and mix[0][2] == pytest.approx(100.0)
     assert len(render.mix_bar(df)) == render.MIX_WIDTH
+
+
+class TestCardMirrorsTheTable:
+    """The card exists to be the dashboard table, pasted into Strava."""
+
+    def test_every_row_names_its_fields(self, one_workout):
+        """Five unlabelled numbers per row is why the old card was unreadable."""
+        card = render.set_card(one_workout, HEADER)
+        assert "set · time · zone · speed · pace/50" in card
+
+    def test_the_scaleless_pace_bar_is_gone(self, one_workout):
+        """It was drawn against the extremes of one workout, so its length meant
+        nothing a reader could carry between cards."""
+        assert render.BAR not in render.set_card(one_workout, HEADER)
+
+    def test_a_medley_set_is_named_IM_not_one_of_its_legs(self):
+        """A medley's lengths are one of each stroke, so the mode is a four-way
+        tie — which pandas breaks alphabetically, into 'backstroke'."""
+        sets = [{"set_id": 1, "reps": 3, "rep_yards": 100, "rep_seconds": 110.4,
+                 "stroke": "IM", "pace_50_s": 55.2, "hr_zone": None,
+                 "speed": None, "pr": False}]
+        card = render.set_card(_im_frame(), HEADER, sets)
+        assert "3×100 IM" in card
+        assert "back" not in card
+
+    def test_an_unrankable_set_says_so(self):
+        """A distance with too few comparable reps gets a dash, not a number."""
+        sets = [{"set_id": 1, "reps": 1, "rep_yards": 1250, "rep_seconds": 1240.0,
+                 "stroke": "freestyle", "pace_50_s": 49.6, "hr_zone": None,
+                 "speed": None, "pr": True}]
+        card = render.set_card(_im_frame(), HEADER, sets)
+        assert "—" in card and "★" in card
+
+    def test_zones_and_strokes_use_different_shapes(self):
+        """Both palettes used squares, so a blue square meant freestyle in one
+        column and Z2 in another."""
+        assert not (set(render.ZONE_COLOR.values())
+                    & set(render.STROKE_COLOR.values()))
+
+
+def _im_frame():
+    """Minimal frame — the rows come from `sets`, this only supplies the count."""
+    import pandas as pd
+    return pd.DataFrame({"set_id": [1] * 12, "rep_id": [1] * 12,
+                         "idx": range(1, 13), "duration_s": [27.6] * 12,
+                         "pace_s": [27.6] * 12, "predicted": ["IM"] * 12,
+                         "pool_m": [22.86] * 12})

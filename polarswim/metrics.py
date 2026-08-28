@@ -41,10 +41,21 @@ from sqlalchemy.engine import Engine
 
 from .models import hr_samples, workouts
 
-# Five-zone model as a fraction of maximum heart rate. Standard boundaries; what
-# makes them swimming-specific is the maximum they are applied to.
+# Five-zone model as a fraction of heart-rate RESERVE — the Karvonen method —
+# rather than of maximum heart rate.
+#
+# The percentages below are the conventional five-zone boundaries; what changed
+# is the span they divide. Taking them as a fraction of maximum measures from a
+# heart rate of zero, which nobody has, so the bottom zone covers everything up
+# to 60% of max and is unreachable in the water: it put an easy swim in Z3 and a
+# steady aerobic set in Z4, reading a whole zone hot. Measuring from resting
+# heart rate to maximum divides the range a swimmer actually occupies, so the
+# bottom zone becomes real easy swimming and the top one becomes genuinely hard.
+#
+# This is also the scheme most training plans and coaches use, which matters for
+# a number anyone might compare against their own.
 ZONE_BANDS = [
-    ("Z1", 0.00, 0.60, "recovery",   "#6b7280"),
+    ("Z1", 0.00, 0.60, "easy",       "#6b7280"),
     ("Z2", 0.60, 0.70, "endurance",  "#4aa3ff"),
     ("Z3", 0.70, 0.80, "tempo",      "#3ddc84"),
     ("Z4", 0.80, 0.90, "threshold",  "#f0a848"),
@@ -117,28 +128,38 @@ class SwimmerReference:
     best_im: dict[int, dict] = field(default_factory=dict)
 
     # --- heart rate ---------------------------------------------------------
+    def _bpm_at(self, fraction: float) -> int:
+        """The heart rate at a given fraction of reserve, in bpm."""
+        span = max(1, self.hr_max - self.hr_rest)
+        return int(round(self.hr_rest + fraction * span))
+
     def zone_bounds(self) -> list[dict]:
         """The zone table, in bpm, for display as a key."""
-        out = []
-        for name, lo, hi, label, colour in ZONE_BANDS:
-            out.append({
-                "zone": name, "label": label, "color": colour,
-                "low": int(round(lo * self.hr_max)),
-                "high": int(round(min(hi, 1.0) * self.hr_max)),
-            })
-        return out
+        return [{
+            "zone": name, "label": label, "color": colour,
+            "low": self._bpm_at(lo),
+            "high": min(self._bpm_at(hi), self.hr_max),
+        } for name, lo, hi, label, colour in ZONE_BANDS]
 
     def hr_zone(self, bpm: float | None) -> dict | None:
-        """Which zone a heart rate falls in."""
+        """Which zone a heart rate falls in, by fraction of reserve.
+
+        `pct_max` is still reported as a fraction of maximum, because that is the
+        number people quote to each other; the zone it lands in is what changed.
+        """
         if bpm is None or not np.isfinite(bpm) or bpm <= 0:
             return None
-        frac = bpm / self.hr_max
+        span = max(1, self.hr_max - self.hr_rest)
+        frac = (bpm - self.hr_rest) / span
+        pct_max = round(100 * bpm / self.hr_max)
         for name, lo, hi, label, colour in ZONE_BANDS:
             if lo <= frac < hi:
                 return {"zone": name, "label": label, "color": colour,
-                        "pct_max": round(100 * frac)}
-        return {"zone": "Z5", "label": "max", "color": ZONE_BANDS[-1][4],
-                "pct_max": round(100 * frac)}
+                        "pct_max": pct_max, "pct_reserve": round(100 * frac)}
+        # Below resting, or above maximum: both ends clamp rather than vanish.
+        band = ZONE_BANDS[0] if frac < 0 else ZONE_BANDS[-1]
+        return {"zone": band[0], "label": band[3], "color": band[4],
+                "pct_max": pct_max, "pct_reserve": round(100 * frac)}
 
     # --- speed --------------------------------------------------------------
     def speed_percentile(self, yards: int, seconds: float,
@@ -173,6 +194,23 @@ class SwimmerReference:
         return {"percentile": round(pct), "color": colour, "n": int(len(history)),
                 "distance": int(yards), "basis": basis,
                 "stroke": stroke if basis == "stroke" else None}
+
+    def im_percentile(self, yards: int, seconds: float) -> dict | None:
+        """How a medley round ranks against this swimmer's other medleys.
+
+        A 100 IM must not be ranked against 100 frees. The generic path would do
+        exactly that — there is no (100, "IM") entry in the per-stroke history,
+        so it falls back to distance alone, where the field is overwhelmingly
+        freestyle and every medley lands near the bottom regardless of how well
+        it was swum.
+        """
+        history = self.im_times_by_distance.get(int(yards))
+        if history is None or len(history) < 3 or not np.isfinite(seconds):
+            return None
+        pct = float((history > seconds).mean() * 100.0)
+        return {"percentile": round(pct), "color": self._pct_colour(pct),
+                "n": int(len(history)), "distance": int(yards), "basis": "medley",
+                "stroke": "IM"}
 
     # --- training load ------------------------------------------------------
     def hr_reserve(self, hr_series: np.ndarray) -> np.ndarray:
