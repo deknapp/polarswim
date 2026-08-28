@@ -62,13 +62,20 @@ CLASSES = ("freestyle", "backstroke", "breaststroke", "butterfly",
 
 @dataclass
 class Repair:
-    """One turn-detection defect we corrected."""
+    """One turn-detection defect we corrected.
+
+    Both defects are expressed the same way, as how many real pool lengths one
+    record covers. A missed wall fuses two lengths into one record (factor 2); a
+    spurious wall splits one length across two records (factor 0.5 each). Dividing
+    the record's time by its factor recovers the per-length pace in both cases,
+    which is why one field describes both defects.
+    """
     workout_id: int
     idx: int
     observed_s: float
     set_median_s: float
-    factor: int                     # how many lengths the record actually covers
-    kind: str                       # 'merged'
+    factor: float                   # real lengths this record covers: 2, 3, 4, or 0.5
+    kind: str                       # 'merged' | 'split'
 
 
 @dataclass
@@ -184,8 +191,76 @@ def detect_merges(df: pd.DataFrame, max_factor: int = 4,
                 continue
             if abs(ratio - factor) > tolerance:
                 continue                       # not near-integer: a slow length
-            repairs.append(Repair(wid, row.idx, row.pace_s, med, factor, "merged"))
+            repairs.append(Repair(wid, row.idx, row.pace_s, med,
+                                  float(factor), "merged"))
     return repairs
+
+
+def detect_splits(df: pd.DataFrame, fast_ratio: float = 0.72,
+                  pair_tolerance: float = 0.30) -> list[Repair]:
+    """Find pairs of records that are really one length cut in two.
+
+    The mirror image of a merge: instead of missing a wall, the sensor invents
+    one, and a single length arrives as two impossibly fast records. One fast
+    record on its own is just a fast length, so the evidence required is a PAIR —
+    adjacent, with no rest between them (a swimmer cannot rest mid-length), each
+    implausibly fast against the set's median, and together summing back to about
+    one normal length. That conjunction is what a real sprint does not produce.
+    """
+    repairs: list[Repair] = []
+    for (wid, sid), g in df.groupby(["workout_id", "set_id"]):
+        if len(g) < 4:
+            continue
+        med = float(g["pace_s"].median())
+        if med <= 0:
+            continue
+        rows = list(g.sort_values("idx").itertuples())
+        i = 0
+        while i < len(rows) - 1:
+            a, b = rows[i], rows[i + 1]
+            pair_ok = (
+                b.idx == a.idx + 1                      # adjacent records
+                and a.rep_id == b.rep_id                # no rest between them
+                and a.pace_s / med < fast_ratio
+                and b.pace_s / med < fast_ratio
+                and abs((a.pace_s + b.pace_s) / med - 1.0) <= pair_tolerance
+            )
+            if pair_ok:
+                for row in (a, b):
+                    repairs.append(Repair(wid, row.idx, row.pace_s, med, 0.5, "split"))
+                i += 2                                  # don't reuse b in a new pair
+            else:
+                i += 1
+    return repairs
+
+
+def detect_repairs(df: pd.DataFrame) -> list[Repair]:
+    """Every turn-detection defect we can identify, of either kind."""
+    return detect_merges(df) + detect_splits(df)
+
+
+def apply_repairs(df: pd.DataFrame, repairs: list[Repair]) -> pd.DataFrame:
+    """Correct the pace of repaired records, then restate the set statistics.
+
+    Detecting a defect is only half the job: until the correction is applied, a
+    merged record still carries a doubled time, still falls past the slow end of
+    the distribution, and is still classified on a pace no swimmer swam. So the
+    record's pace is divided by the number of lengths it covers, and every
+    set-level statistic derived from pace is recomputed from the corrected values.
+
+    `pace_s` afterwards always means "seconds per real pool length". The observed
+    figure is preserved as `pace_observed_s` — Polar's record is data, and the
+    correction is inference, so the two are never conflated.
+    """
+    df = df.copy()
+    df["pace_observed_s"] = df["pace_s"]
+    df["length_factor"] = 1.0
+    if repairs:
+        factors = {(r.workout_id, r.idx): r.factor for r in repairs}
+        key = list(zip(df["workout_id"], df["idx"]))
+        df["length_factor"] = [factors.get(k, 1.0) for k in key]
+        df["pace_s"] = df["pace_observed_s"] / df["length_factor"]
+    return _set_stats(df)
 
 
 # --- features --------------------------------------------------------------
@@ -214,8 +289,17 @@ def add_features(df: pd.DataFrame, hr: dict[int, np.ndarray]) -> pd.DataFrame:
     df["hr_cost"] = costs
     df["hr_abs"] = absolute
 
-    # Statistics use the set, not the rep: a set pools every rep of the same
-    # distance, which is far more lengths to estimate a median and spread from.
+    return _set_stats(df)
+
+
+def _set_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Set-level summaries of pace, rest and size.
+
+    Statistics use the set, not the rep: a set pools every rep of the same
+    distance, which is far more lengths to estimate a median and spread from.
+    Recomputed after any repair, since a corrected pace changes every one of them.
+    """
+    df = df.copy()
     grp = df.groupby(["workout_id", "set_id"])["pace_s"]
     df["set_median_pace_s"] = grp.transform("median")
     df["set_size"] = df.groupby(["workout_id", "set_id"])["idx"].transform("size")
@@ -223,6 +307,18 @@ def add_features(df: pd.DataFrame, hr: dict[int, np.ndarray]) -> pd.DataFrame:
     df["pace_rel"] = df["pace_s"] / df["set_median_pace_s"]
     df["rep_duration_s"] = df.groupby(
         ["workout_id", "rep_id"])["duration_s"].transform("sum")
+
+    # Rest is a property of the boundary between reps, so it is read once per rep
+    # — from the first length of each — and not averaged over the zeros that sit
+    # between the lengths inside a rep.
+    rep_first = df.drop_duplicates(["workout_id", "rep_id"])
+    set_rest = (rep_first.groupby(["workout_id", "set_id"])["rest_before_s"]
+                .median().rename("set_rest_s"))
+    # Recomputed, not merged alongside: this runs a second time after a repair,
+    # and a merge onto an existing column would silently produce _x/_y suffixes.
+    df = df.drop(columns=["set_rest_s"], errors="ignore")
+    df = df.merge(set_rest, on=["workout_id", "set_id"], how="left")
+    df["set_rest_s"] = df["set_rest_s"].fillna(0.0)
     return df
 
 
@@ -239,6 +335,12 @@ def learn_params(df: pd.DataFrame) -> dict[str, dict[str, float]]:
     if pace.empty:
         return {}
     fast = float(pace.quantile(0.30))          # the freestyle-dominated mode
+
+    # Rest is learned per SET, not per length: a set is one decision the swimmer
+    # made about how much recovery the work needed, and repeating it once per
+    # length would weight long sets out of proportion.
+    sets = (df.drop_duplicates(["workout_id", "set_id"])["set_rest_s"].dropna()
+            if "set_rest_s" in df.columns else pd.Series(dtype=float))
     return {
         "_global": {
             "pace_p10": float(pace.quantile(0.10)),
@@ -248,6 +350,8 @@ def learn_params(df: pd.DataFrame) -> dict[str, dict[str, float]]:
             "pace_p90": float(pace.quantile(0.90)),
             "cost_p33": float(cost.quantile(0.33)) if len(cost) else 0.0,
             "cost_p67": float(cost.quantile(0.67)) if len(cost) else 0.0,
+            "rest_p50": float(sets.quantile(0.50)) if len(sets) else 0.0,
+            "rest_p80": float(sets.quantile(0.80)) if len(sets) else 0.0,
             "n_obs": float(len(pace)),
         }
     }
@@ -256,14 +360,24 @@ def learn_params(df: pd.DataFrame) -> dict[str, dict[str, float]]:
 def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFrame:
     """Assign a class and a confidence to every length.
 
-    Deliberately transparent rules over the two learned axes rather than an opaque
+    Deliberately transparent rules over learned axes rather than an opaque
     clustering: each decision is auditable, and `undetermined` is used honestly
     wherever the evidence genuinely doesn't separate two classes.
+
+    Three axes, not two. Pace and heart-rate cost separate most of the field, but
+    they leave butterfly and backstroke overlapping — both are slow and expensive.
+    **Rest** is what parts them. Rest is a decision the swimmer makes about how
+    much recovery the work needs, so a set that bought unusually long rest was
+    unusually hard for its distance, and butterfly buys more rest than anything
+    else at the same pace. Set size is used differently: it does not name a
+    stroke, it says how much to trust the set statistics the other rules rest on.
     """
     g = params.get("_global", {})
     p30, p50, p70, p90 = (g.get("pace_p30", 24), g.get("pace_p50", 27),
                           g.get("pace_p70", 30), g.get("pace_p90", 35))
     c33, c67 = g.get("cost_p33", 0.0), g.get("cost_p67", 0.0)
+    r50, r80 = g.get("rest_p50", 0.0), g.get("rest_p80", 0.0)
+    have_rest = r80 > 0
     # Freestyle is the majority stroke, so it is the default hypothesis. Another
     # stroke is only called on positive evidence; where the evidence is weak the
     # answer is `undetermined` rather than a coin flip dressed up as a result.
@@ -271,38 +385,60 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
     out, conf = [], []
     for r in df.itertuples():
         pace, cost, cv = r.pace_s, r.hr_cost, r.set_cv
+        rest = getattr(r, "set_rest_s", 0.0)
+        size = getattr(r, "set_size", 0)
+        long_rest = have_rest and rest >= r80
+        # A set of one or two lengths has no usable median or spread, so every
+        # rule below that reads a set statistic is reading noise. Say so in the
+        # confidence rather than pretending the call is as good as any other.
+        trust = 1.0 if size >= 4 else 0.8
 
-        # A uniformly slow set at low cardiac cost is drill or kick work.
-        if r.set_median_pace_s >= p90 and cv < 0.18:
-            out.append("other"); conf.append(0.72); continue
+        def call(name: str, c: float) -> None:
+            out.append(name)
+            conf.append(round(c * trust, 3))
+
+        # Drill and kick: a set that is uniformly slow, cheap, and taken on short
+        # rest. The rest condition matters — a uniformly slow set that bought long
+        # rest is a hard stroke set, not drill, and the old rule called it drill.
+        if (size >= 4 and r.set_median_pace_s >= p90 and cv < 0.18
+                and not long_rest):
+            call("other", 0.74); continue
 
         # The dominant fast mode is freestyle.
         if pace <= p30:
-            out.append("freestyle"); conf.append(0.80); continue
+            call("freestyle", 0.80); continue
 
         if pace <= p70:
-            # Fast-to-typical: still freestyle unless unusually expensive, which
-            # is butterfly's signature — fast for the effort it costs.
+            # Fast-to-typical: still freestyle unless it was unusually expensive,
+            # which is butterfly's signature — fast for what it costs. Long rest
+            # on top of that cost is the confirming evidence.
             if not np.isnan(cost) and cost >= c67:
-                out.append("butterfly"); conf.append(0.45)
+                call("butterfly", 0.58 if long_rest else 0.45)
             else:
-                out.append("freestyle"); conf.append(0.65)
+                call("freestyle", 0.65)
             continue
 
         if pace <= p90:
             if np.isnan(cost):
-                out.append("undetermined"); conf.append(0.30); continue
+                # No heart rate. Rest alone cannot name a stroke, but a slow set
+                # on short rest is far more likely aerobic work than a race stroke.
+                call("other" if have_rest and rest <= r50 else "undetermined", 0.30)
+                continue
             if cost >= c67:
-                # Slow and expensive: working hard, not travelling.
-                out.append("backstroke"); conf.append(0.45)
+                # Slow and expensive: working hard without travelling. Backstroke
+                # and butterfly both look like this; the one that bought the most
+                # rest is the one that cost the most to swim.
+                call("butterfly", 0.42) if long_rest else call("backstroke", 0.48)
             elif cost <= c33:
                 # Slow and cheap: the glide phase of breaststroke.
-                out.append("breaststroke"); conf.append(0.50)
+                call("breaststroke", 0.50)
             else:
-                out.append("undetermined"); conf.append(0.33)
+                call("undetermined", 0.33)
             continue
 
-        out.append("other"); conf.append(0.45)
+        # Slower than anything else in the history. Drill, kick, or recovery —
+        # unless it bought long rest, in which case it was hard, not easy.
+        call("undetermined" if long_rest else "other", 0.45)
 
     df = df.copy()
     df["predicted"] = out
@@ -322,21 +458,32 @@ def analyze(engine: Engine, workout_id: int | None = None,
     df = assign_sets(df)
     hr = load_hr(engine, sorted(df["workout_id"].unique().tolist()))
     df = add_features(df, hr)
-    repairs = detect_merges(df)
+
+    # Repair first, then classify. An uncorrected merge carries a doubled time and
+    # would be classified on a pace nobody swam, which is the whole reason the
+    # correction has to land before the classifier sees the data.
+    repairs = detect_repairs(df)
+    df = apply_repairs(df, repairs)
 
     # Learn from the whole history so a single-workout run still uses good
     # estimates, then classify only what was asked for.
-    full = df if workout_id is None else assign_sets(load_lengths(engine))
-    if workout_id is not None:
-        full = add_features(full, load_hr(engine, sorted(full["workout_id"].unique().tolist())))
+    if workout_id is None:
+        full = df
+    else:
+        full = assign_sets(load_lengths(engine))
+        full = add_features(
+            full, load_hr(engine, sorted(full["workout_id"].unique().tolist())))
+        full = apply_repairs(full, detect_repairs(full))
     params = learn_params(full)
     df = classify(df, params)
 
-    merged = {(r.workout_id, r.idx) for r in repairs}
+    kinds = {(r.workout_id, r.idx): r.kind for r in repairs}
     rows = [dict(workout_id=int(r.workout_id), idx=int(r.idx),
                  predicted=r.predicted, confidence=float(r.confidence),
-                 method="pace_cost_v1", set_id=int(r.set_id),
-                 inferred_split=int((r.workout_id, r.idx) in merged))
+                 method="pace_cost_rest_v2", set_id=int(r.set_id),
+                 length_factor=float(r.length_factor),
+                 repair_kind=kinds.get((r.workout_id, r.idx)),
+                 inferred_split=int(kinds.get((r.workout_id, r.idx)) == "merged"))
             for r in df.itertuples()]
 
     if persist:

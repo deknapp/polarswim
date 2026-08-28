@@ -45,6 +45,9 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     df = analyze.assign_sets(df)
     hr = analyze.load_hr(engine, sorted(df["workout_id"].unique().tolist()))
     df = analyze.add_features(df, hr)
+    # Repairs are applied here too, so the card, the image and the web UI all
+    # describe the swim with the same corrected paces the classifier used.
+    df = analyze.apply_repairs(df, analyze.detect_repairs(df))
     if params is None:
         from . import db
         params = db.load_model_params(engine) or analyze.learn_params(df)

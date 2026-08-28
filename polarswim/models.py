@@ -115,6 +115,11 @@ predictions = Table(
     Column("method", String(32)),
     Column("set_id", Integer),               # which set within the workout
     Column("inferred_split", Integer, nullable=False, default=0),  # 1 = boundary we invented
+    # How many real pool lengths this record covers once turn-detection defects
+    # are corrected: 2-4 where a missed wall fused lengths, 0.5 where a spurious
+    # wall split one, 1 for the overwhelming majority that need no correction.
+    Column("length_factor", Float, default=1.0),
+    Column("repair_kind", String(8)),        # 'merged' | 'split' | NULL
     Column("predicted_at", String(32), nullable=False),
     ForeignKeyConstraint(["workout_id", "idx"], ["lengths.workout_id", "lengths.idx"],
                          ondelete="CASCADE"),

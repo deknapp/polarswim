@@ -158,3 +158,138 @@ class TestLearning:
 
     def test_empty_input_yields_no_params(self):
         assert analyze.learn_params(pd.DataFrame({"pace_s": [], "hr_cost": []})) == {}
+
+
+def _featured(durations, gaps=None, hr=None, workout_id=1):
+    """A frame carried all the way to classification-ready features."""
+    df = analyze.assign_sets(_lengths(durations, gaps=gaps, workout_id=workout_id))
+    series = {workout_id: np.full(3600, hr, dtype=float)} if hr else {}
+    return analyze.add_features(df, series)
+
+
+class TestSplitRepair:
+    """The mirror of a merge: one length arriving as two impossibly fast records."""
+
+    def test_a_split_pair_is_detected(self):
+        durations = [26] * 8
+        durations[3:5] = [12, 14]          # one 26 s length cut in two
+        df = _featured(durations)
+        splits = analyze.detect_splits(df)
+        assert [r.idx for r in splits] == [4, 5]
+        assert all(r.factor == 0.5 for r in splits)
+
+    def test_a_single_fast_length_is_not_a_split(self):
+        """One fast record is a fast length. Only a PAIR is evidence."""
+        durations = [26] * 8
+        durations[3] = 14
+        assert analyze.detect_splits(_featured(durations)) == []
+
+    def test_a_pair_separated_by_rest_is_not_a_split(self):
+        """A swimmer cannot rest in the middle of a length."""
+        durations = [26] * 8
+        durations[3:5] = [12, 14]
+        gaps = [0] * 8
+        gaps[4] = 30                        # rest between the two fast records
+        assert analyze.detect_splits(_featured(durations, gaps=gaps)) == []
+
+    def test_a_genuinely_fast_set_is_not_split_repair(self):
+        """A whole set of sprints has no outlier: everything is fast together."""
+        assert analyze.detect_splits(_featured([13] * 8)) == []
+
+
+class TestRepairsAreApplied:
+    """Detecting a defect is only half the job."""
+
+    def test_a_merged_record_is_corrected_to_a_per_length_pace(self):
+        durations = [26] * 8
+        durations[3] = 52                   # a missed wall fused two lengths
+        df = _featured(durations)
+        out = analyze.apply_repairs(df, analyze.detect_repairs(df))
+        row = out[out["idx"] == 4].iloc[0]
+        assert row["length_factor"] == 2
+        assert row["pace_observed_s"] == pytest.approx(52, abs=0.5)
+        assert row["pace_s"] == pytest.approx(26, abs=0.5)
+
+    def test_a_split_pair_is_corrected_to_a_per_length_pace(self):
+        durations = [26] * 8
+        durations[3:5] = [13, 13]
+        df = _featured(durations)
+        out = analyze.apply_repairs(df, analyze.detect_repairs(df))
+        pair = out[out["idx"].isin([4, 5])]
+        assert (pair["length_factor"] == 0.5).all()
+        assert pair["pace_s"].tolist() == pytest.approx([26, 26], abs=0.5)
+
+    def test_an_untouched_length_keeps_its_observed_pace(self):
+        df = _featured([26] * 8)
+        out = analyze.apply_repairs(df, analyze.detect_repairs(df))
+        assert (out["length_factor"] == 1.0).all()
+        assert out["pace_s"].tolist() == pytest.approx(out["pace_observed_s"].tolist())
+
+    def test_set_statistics_are_restated_after_a_repair(self):
+        """A corrected pace changes the median every later rule reads."""
+        durations = [26] * 8
+        durations[3] = 52
+        df = _featured(durations)
+        out = analyze.apply_repairs(df, analyze.detect_repairs(df))
+        assert out["set_median_pace_s"].iloc[0] == pytest.approx(26, abs=0.5)
+        assert out["set_cv"].iloc[0] < 0.05      # uniform once repaired
+
+    def test_a_merged_length_is_no_longer_misclassified_as_slow_work(self):
+        """The reason repair must precede classification: an uncorrected merge
+        carries a doubled time and is classified on a pace nobody swam."""
+        durations = [26] * 12
+        durations[5] = 52
+        df = _featured(durations)
+        # Learned from a history with real spread. A single uniform set is its own
+        # p90, which would make every length in it look like the slow tail.
+        params = {"_global": {"pace_p30": 26, "pace_p50": 28, "pace_p70": 31,
+                              "pace_p90": 38, "cost_p33": 5, "cost_p67": 20,
+                              "rest_p50": 20, "rest_p80": 45}}
+
+        unrepaired = analyze.classify(df, params)
+        repaired = analyze.classify(
+            analyze.apply_repairs(df, analyze.detect_repairs(df)), params)
+
+        assert unrepaired[unrepaired["idx"] == 6]["predicted"].iloc[0] == "other"
+        assert repaired[repaired["idx"] == 6]["predicted"].iloc[0] == "freestyle"
+
+
+class TestRestAndSetSizeInform_TheClassifier:
+    """Rest is the third axis; set size is how much to trust the other two."""
+
+    def test_rest_is_read_once_per_rep_not_per_length(self):
+        """The zeros between lengths inside a rep are turns, not rest."""
+        df = _featured([26] * 8, gaps=[0, 0, 0, 0, 40, 0, 0, 0])
+        assert df["set_rest_s"].iloc[0] == pytest.approx(20.0)   # median of 0 and 40
+
+    def test_long_rest_separates_butterfly_from_backstroke(self):
+        """Both are slow and expensive; the one that bought more rest cost more."""
+        params = {"_global": {"pace_p30": 24, "pace_p50": 27, "pace_p70": 30,
+                              "pace_p90": 40, "cost_p33": 5, "cost_p67": 20,
+                              "rest_p50": 20, "rest_p80": 45}}
+        short = _featured([34] * 8, gaps=[10] * 8, hr=160)
+        long = _featured([34] * 8, gaps=[60] * 8, hr=160)
+        short["hr_cost"] = 30.0
+        long["hr_cost"] = 30.0
+        assert analyze.classify(short, params)["predicted"].iloc[0] == "backstroke"
+        assert analyze.classify(long, params)["predicted"].iloc[0] == "butterfly"
+
+    def test_a_slow_set_on_long_rest_is_not_called_drill(self):
+        """Drill is slow AND cheap AND taken on short rest. Long rest means work."""
+        params = {"_global": {"pace_p30": 24, "pace_p50": 27, "pace_p70": 30,
+                              "pace_p90": 33, "cost_p33": 5, "cost_p67": 20,
+                              "rest_p50": 20, "rest_p80": 45}}
+        drill = _featured([36] * 8, gaps=[8] * 8)
+        drill["hr_cost"] = 10.0
+        assert analyze.classify(drill, params)["predicted"].iloc[0] == "other"
+
+        hard = _featured([36] * 8, gaps=[70] * 8)
+        hard["hr_cost"] = 10.0
+        assert analyze.classify(hard, params)["predicted"].iloc[0] != "other"
+
+    def test_a_tiny_set_is_called_with_lower_confidence(self):
+        """Two lengths have no usable median; the call says so."""
+        params = analyze.learn_params(_featured([26] * 20))
+        big = analyze.classify(_featured([26] * 8), params)
+        small = analyze.classify(_featured([26] * 2), params)
+        assert small["confidence"].iloc[0] < big["confidence"].iloc[0]
