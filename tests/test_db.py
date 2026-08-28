@@ -129,3 +129,59 @@ class TestPortability:
             ddl = str(sa.schema.CreateTable(table).compile(
                 dialect=postgresql.dialect()))
             assert "CREATE TABLE" in ddl
+
+
+# --- additive migration ----------------------------------------------------
+def test_migrate_is_a_no_op_on_a_current_database(engine):
+    assert db.migrate(engine) == []
+
+
+def test_migrate_adds_a_column_the_model_gained(engine):
+    """The failure this exists to prevent: create_all leaves an existing table
+    untouched, so a column added to models.py never reaches an old database."""
+    with engine.begin() as c:
+        c.execute(sa.text("ALTER TABLE predictions DROP COLUMN set_id"))
+    assert any("set_id" in ddl for ddl in db.migrate(engine))
+    cols = {c["name"] for c in sa.inspect(engine).get_columns("predictions")}
+    assert "set_id" in cols
+
+
+def test_migrate_preserves_rows_in_the_altered_table(engine, pool_swim_payload):
+    for w in parse_details(pool_swim_payload):
+        db.upsert_workout(engine, w)
+    with engine.connect() as c:
+        wid, idx = c.execute(sa.select(lengths.c.workout_id, lengths.c.idx)).first()
+    db.save_predictions(engine, [dict(
+        workout_id=wid, idx=idx, predicted="freestyle", confidence=0.8,
+        method="t", set_id=1, inferred_split=0)])
+    with engine.begin() as c:
+        c.execute(sa.text("ALTER TABLE predictions DROP COLUMN confidence"))
+    db.migrate(engine)
+    with engine.connect() as c:
+        row = c.execute(sa.text("SELECT predicted, confidence FROM predictions")).first()
+    assert row[0] == "freestyle"
+    assert row[1] is None          # old rows never observed the new column
+
+
+def test_migrate_refuses_to_guess_at_a_new_primary_key(engine, monkeypatch):
+    """Anything beyond adding a nullable column is a rebuild, not a migration."""
+    from polarswim import models
+    extra = sa.Column("scheme", sa.Integer, primary_key=True)
+    monkeypatch.setattr(
+        db, "ALL_TABLES",
+        (sa.Table("model_params", sa.MetaData(),
+                  sa.Column("class_name", sa.String(24), primary_key=True),
+                  sa.Column("param", sa.String(32), primary_key=True),
+                  sa.Column("value", sa.Float, nullable=False),
+                  sa.Column("updated_at", sa.String(32), nullable=False),
+                  extra),))
+    with pytest.raises(db.SchemaDrift, match="reparse"):
+        db.migrate(engine)
+
+
+def test_a_column_the_database_has_but_the_model_dropped_is_left_alone(engine):
+    with engine.begin() as c:
+        c.execute(sa.text("ALTER TABLE workouts ADD COLUMN legacy_note TEXT"))
+    assert db.migrate(engine) == []
+    cols = {c["name"] for c in sa.inspect(engine).get_columns("workouts")}
+    assert "legacy_note" in cols

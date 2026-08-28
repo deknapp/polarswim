@@ -81,7 +81,77 @@ def connect(path_or_url: str | Path | None = None) -> Engine:
             cur.close()
 
     metadata.create_all(engine)
+    migrate(engine)
     return engine
+
+
+class SchemaDrift(RuntimeError):
+    """A schema change the additive migration cannot perform."""
+
+
+def migrate(engine: Engine) -> list[str]:
+    """Bring an existing database up to the columns declared in `models`.
+
+    `create_all` creates missing TABLES but never touches a table that already
+    exists, so adding a column to `models.py` would otherwise leave every
+    already-synced database one column short — a failure that surfaces much later
+    as an OperationalError on a column the code is certain exists. This closes
+    that gap for the only schema change that happens in practice: a new nullable
+    column with a default.
+
+    Anything beyond that — a dropped column, a changed type, a new primary key —
+    is deliberately NOT attempted. Guessing at those risks the data. It raises
+    `SchemaDrift` instead, and the fix is to delete the database and run
+    `polarswim reparse`, which rebuilds everything from the stored raw payloads
+    with no network and no credential.
+
+    Returns the DDL it applied, so callers and tests can see what moved.
+    """
+    inspector = sa.inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    applied: list[str] = []
+
+    for table in ALL_TABLES:
+        if table.name not in existing_tables:
+            continue                     # create_all just made it, in full
+        have = {c["name"] for c in inspector.get_columns(table.name)}
+
+        # A column in the database but not in the model is harmless — older data
+        # we no longer read. A column in the model but not the database is the
+        # case worth fixing.
+        for name in (c.name for c in table.columns if c.name not in have):
+            column = table.columns[name]
+            if column.primary_key:
+                raise SchemaDrift(
+                    f"{table.name}.{name} is a new primary-key column; "
+                    "delete the database and run `polarswim reparse` to rebuild it")
+            applied.append(_add_column(engine, table, column))
+
+    return applied
+
+
+def _add_column(engine: Engine, table: sa.Table, column: sa.Column) -> str:
+    """ALTER TABLE ... ADD COLUMN, with a default every backend will accept.
+
+    SQLite refuses a NOT NULL column with no default on a table that already has
+    rows — there would be nothing to put in the existing ones. Where the model
+    supplies a scalar default we use it; where it does not, the column is added
+    nullable, since a NULL in old rows is honest about the fact that the value was
+    never observed.
+    """
+    ddl = f'ALTER TABLE {table.name} ADD COLUMN {column.name} '
+    ddl += column.type.compile(engine.dialect)
+
+    default = getattr(column.default, "arg", None)
+    if default is not None and not callable(default):
+        literal = f"'{default}'" if isinstance(default, str) else default
+        ddl += f" DEFAULT {literal}"
+        if not column.nullable:
+            ddl += " NOT NULL"
+
+    with engine.begin() as c:
+        c.execute(sa.text(ddl))
+    return ddl
 
 
 # --- reads -----------------------------------------------------------------
