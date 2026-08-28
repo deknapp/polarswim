@@ -406,3 +406,40 @@ class TestCorrectionsTab:
             for s in _report.sets_for_workout(df, set(), ref):
                 if s["stroke"] == "IM":
                     assert all(r["stroke"] == "IM" for r in s["reps_detail"])
+
+
+class TestTheCardIsOneCard:
+    """The pasted card and the one on screen must be the same card."""
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    def test_the_web_card_matches_the_cli_card(self, client, workout_id):
+        """They were built by two separate paths and had drifted: the dashboard
+        rendered a dash in every zone and speed column because it assembled the
+        rows without a swimmer reference."""
+        from polarswim import cli, db as _db, metrics, render
+        from polarswim import report as _report
+
+        engine = _db.connect(SAMPLE)
+        df = _report.classified_lengths(engine, workout_id)
+        header = cli._header(engine, workout_id)
+        header.update(_report.card_extras(engine, workout_id, df))
+        ref = metrics.build_reference(engine, _report.classified_lengths(engine))
+        expected = render.strava_block(
+            df, header, _report.sets_for_workout(df, set(), ref))
+
+        got = client.get(f"/api/workout/{workout_id}").get_json()["card"]
+        assert got.splitlines()[3:] == expected.splitlines()[3:]
+
+    def test_the_card_reports_a_zone_for_every_row(self, client, workout_id):
+        card = client.get(f"/api/workout/{workout_id}").get_json()["card"]
+        rows = [l for l in card.splitlines() if " · " in l and "×" in l]
+        assert rows
+        for row in rows:
+            assert "Z" in row, f"no effort zone on: {row}"
+
+    def test_the_card_carries_the_effort_scores(self, client, workout_id):
+        card = client.get(f"/api/workout/{workout_id}").get_json()["card"]
+        assert "load" in card

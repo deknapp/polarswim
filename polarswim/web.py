@@ -529,6 +529,8 @@ def create_app(db_url=None) -> Flask:
         repairs = {(r.workout_id, r.idx) for r in res.repairs}
         head = _header(wid)
         ref = _reference()
+        sets = report.sets_for_workout(df, repairs, ref)
+        head.update(report.card_extras(engine, wid, df, ref))
         return jsonify(
             hr_max=ref.hr_max,
             zones=ref.zone_bounds(),
@@ -536,14 +538,14 @@ def create_app(db_url=None) -> Flask:
             header={"date": head["start_time"][:16],
                     "yards": round((head["distance_m"] or 0) / 0.9144),
                     "duration": _fmt(head["duration_s"]), "avg_hr": head["avg_hr"]},
-            sets=report.sets_for_workout(df, repairs, ref),
+            sets=sets,
             mix=[{"stroke": k, "lengths": n, "pct": pct, "yards": n * 25,
                   "color": PIE_COLORS.get(k, "#6b7280")}
                  for k, n, pct in render.stroke_mix(df)],
             paces=[float(x) for x in df.sort_values("idx")["pace_s"]],
             repairs=len(res.repairs),
             im_rounds=len(res.im_rounds),
-            card=render.strava_block(df, head))
+            card=render.strava_block(df, head, sets))
 
     @app.get("/api/image/<int:wid>.svg")
     def workout_image(wid: int):

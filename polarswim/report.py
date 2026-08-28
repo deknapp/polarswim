@@ -313,6 +313,45 @@ def personal_bests(engine: Engine, ref) -> list[dict]:
     return out
 
 
+def card_extras(engine, workout_id: int, df, ref=None) -> dict:
+    """Effort, per-workout time in zone, and any personal bests, for the card.
+
+    Shared by the CLI and the web UI so the pasted card and the one shown on
+    screen are the same card — they had drifted, and the dashboard was rendering
+    a dash in every zone and speed column because it built the rows without a
+    reference attached.
+    """
+    import numpy as np
+    from . import analyze, metrics, render
+    from .models import hr_samples
+
+    # The web UI already holds a reference and rebuilding it here would rescan
+    # every length in the database to render one card.
+    if ref is None:
+        ref = metrics.build_reference(engine, classified_lengths(engine))
+    with engine.connect() as c:
+        hr = np.array([r[0] for r in c.execute(
+            sa.select(hr_samples.c.hr)
+            .where(hr_samples.c.workout_id == workout_id)
+            .order_by(hr_samples.c.t_s))], dtype=float)
+
+    zone_time = []
+    for band in ref.zone_bounds():
+        seconds = int(((hr >= band["low"]) & (hr < band["high"])).sum()) if len(hr) else 0
+        if seconds:
+            zone_time.append({**band, "seconds": seconds,
+                              "pct": round(100 * seconds / max(1, len(hr)), 1)})
+
+    res = analyze.analyze(engine, workout_id=workout_id, persist=False)
+    sets = sets_for_workout(
+        df, {(r.workout_id, r.idx) for r in res.repairs}, ref)
+    prs = [f"{s['reps']}×{s['rep_yards']} {s['stroke']} "
+           f"{render._fmt_rep(s['rep_seconds'])}"
+           for s in sets if s.get("pr")]
+
+    return {"effort": ref.effort_score(workout_id), "zone_time": zone_time,
+            "prs": prs}
+
 def format_season(summary: dict) -> str:
     """Terminal-friendly rendering of `season_summary`."""
     if not summary.get("workouts"):
