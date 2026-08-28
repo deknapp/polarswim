@@ -112,7 +112,8 @@ async function pick(i){
   $('#main').innerHTML=`
    <div class="card"><b>${d.header.date}</b> · ${d.header.yards.toLocaleString()} yd ·
      ${d.header.duration} · avg ${d.header.avg_hr??'–'} bpm
-     ${d.repairs?`<span class="lo"> · ${d.repairs} merged length(s) repaired</span>`:''}
+     ${d.repairs?`<span class="lo"> · ${d.repairs} turn-detection defect(s) repaired</span>`:''}
+     ${d.im_rounds?`<span class="dim"> · ${d.im_rounds} medley round(s)</span>`:''}
      ${d.effort?`<div style="margin-top:10px">
        <span class="chip" style="background:${d.effort.color}">${d.effort.score}</span>
        <span class="dim" style="margin-right:16px">relative load (of 100)</span>
@@ -405,6 +406,7 @@ def create_app(db_url=None) -> Flask:
                  for k, n, pct in render.stroke_mix(df)],
             paces=[float(x) for x in df.sort_values("idx")["pace_s"]],
             repairs=len(res.repairs),
+            im_rounds=len(res.im_rounds),
             card=render.strava_block(df, head))
 
     @app.get("/api/image/<int:wid>.svg")

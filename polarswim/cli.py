@@ -131,7 +131,14 @@ def cmd_analyze(args) -> int:
         print("no lengths to analyze — run `polarswim sync` first", file=sys.stderr)
         return 1
     print(f"analyzed {res.n_lengths:,} lengths")
-    print(f"repaired {len(res.repairs)} merged length(s) (missed wall turns)")
+    merged = sum(1 for r in res.repairs if r.kind == "merged")
+    split = sum(1 for r in res.repairs if r.kind == "split")
+    print(f"repaired {merged} merged length(s) (missed wall turns) and "
+          f"{split} split record(s) (walls the sensor invented)")
+    if res.im_rounds:
+        distances = sorted({r.yards for r in res.im_rounds})
+        print(f"found {len(res.im_rounds)} medley round(s) at "
+              + ", ".join(f"{d} yd" for d in distances))
     print("\n  inferred stroke mix:")
     total = sum(res.counts().values())
     for k, v in sorted(res.counts().items(), key=lambda kv: -kv[1]):

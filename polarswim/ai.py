@@ -37,8 +37,11 @@ stroke label. Understand clearly what the labels are:
 - Stroke labels here were inferred from pace and heart-rate cost alone. They are
   estimates with stated confidence, not measurements. Labels marked `undetermined`
   genuinely could not be resolved.
-- Lengths marked `repaired` were recorded as one length but are really two — the
-  sensor missed a wall turn. Their split point is inferred.
+- Lengths marked `repaired` had a turn-detection defect corrected: either the
+  sensor missed a wall and wrote two lengths as one, or it invented a wall and
+  wrote one length as two. The correction is inferred, not measured.
+- A set marked as a medley was identified by its repeating fly-back-breast-free
+  structure, so those stroke labels are known rather than inferred.
 
 Write a short review covering: the structure of the session and what it was
 probably training, pacing consistency within sets, how heart rate responded and

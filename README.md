@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 211 tests, no network
+pytest -q                                                    # 247 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -101,11 +101,13 @@ re-expresses the classifier's threshold, and it collapsed every slow length to 0
 Distance is measured rather than inferred, so it carries no such feedback loop.
 A distance with fewer than 30 reps reports nothing instead of a fragile number.
 
-**Personal best.** The fastest recorded time at a distance and stroke. Two caveats
-are built in: the stroke is inferred, so a best is provisional; and reps faster than
-65% of the swimmer's median pace are excluded as turn-detection artifacts — before
-that filter the "best" 25 yd freestyle was 13.6 s against a 26 s median, which is a
-split length, not a swim. 45 such reps were excluded.
+**Personal best.** The fastest recorded time at a distance and stroke, grouped into
+a tab per stroke and led by the distances that stroke is actually raced at. Two
+caveats are built in: the stroke is inferred, so a best is provisional; and reps
+faster than 65% of the swimmer's median pace are excluded as turn-detection artifacts
+— before that filter the "best" 25 yd freestyle was 13.6 s against a 26 s median,
+which is a split length, not a swim. 43 such reps are excluded, down from 45 now that
+detected splits are repaired rather than only dropped.
 
 ## Uploading to Strava
 
@@ -176,29 +178,50 @@ years of practices is not realistic. So the classifier leans on structure instea
 **Sets.** Rests split a practice into sets. Within a set the swimmer is doing one
 thing, which gives every length a local reference that adapts to that day's effort.
 
-**Repair before classify.** Polar's turn detection misses walls, fusing two lengths
-into one record. A slow length is ambiguous alone — merged pair, or genuinely slow
-drill? — but not in context. A merge is an **isolated near-integer multiple** of its
-set's median (2.0x, 3.9x); a drill set is **uniformly** slow (1.0–1.4x). Across the
-full dataset that split 77 slow lengths into 38 merges and 39 real drills. Repaired
-boundaries are marked `inferred_split` in the database and never silently mixed in
-with measured data.
+**Repair before classify.** Polar's turn detection fails in both directions. It
+misses a wall, fusing two lengths into one record; and it invents one, splitting a
+single length into two impossibly fast records. Both are corrected before anything is
+classified — an uncorrected merge carries a doubled time, falls past the slow end of
+the distribution, and would be classified on a pace nobody swam.
 
-**Two axes, no assumed ordering.** Per length we derive normalized pace (seconds per
-25 yd, so a 50 m pool is comparable) and heart-rate cost above that workout's own
-baseline. Both matter, because per-swimmer speed order is *not* universal — plenty of
-swimmers are slower at backstroke than breaststroke. Nothing here assumes a ranking:
+A slow length is ambiguous alone — merged pair, or genuinely slow drill? — but not in
+context. A merge is an **isolated near-integer multiple** of its set's median (2.0x,
+3.9x); a drill set is **uniformly** slow (1.0–1.4x). Across the full dataset that
+split 77 slow lengths into 38 merges and 39 real drills. A split is the mirror image
+and needs a **pair** as evidence: two adjacent records, no rest between them (nobody
+rests mid-length), each implausibly fast against the set median, together summing
+back to one normal length. One fast record alone is just a fast length.
 
-| | pace | cost | reasoning |
-|---|---|---|---|
-| freestyle | fast | any | the dominant mode, and the default hypothesis |
-| butterfly | mid | **high** | expensive for the speed it buys |
-| breaststroke | slow | **low** | the glide phase makes it cheap |
-| backstroke | slow | **high** | working hard without travelling |
-| other | slow, uniform set | low | drill and kick share one class |
+Both are expressed the same way — how many real pool lengths one record covers, 2–4
+for a merge and 0.5 each for a split — so dividing by that factor recovers the
+per-length pace in either case. The observed figure is kept alongside as
+`pace_observed_s`: Polar's record is data, the correction is inference, and the two
+are never conflated. 28 merges and 22 splits across 7,615 lengths.
+
+**Three axes, no assumed ordering.** Per length we derive normalized pace (seconds
+per 25 yd, so a 50 m pool is comparable), heart-rate cost above that workout's own
+baseline, and the rest the set was taken on. All three matter, because per-swimmer
+speed order is *not* universal — plenty of swimmers are slower at backstroke than
+breaststroke. Nothing here assumes a ranking:
+
+| | pace | cost | rest | reasoning |
+|---|---|---|---|---|
+| freestyle | fast | any | any | the dominant mode, and the default hypothesis |
+| butterfly | mid–slow | **high** | **long** | expensive, and it buys recovery |
+| breaststroke | slow | **low** | any | the glide phase makes it cheap |
+| backstroke | slow | **high** | short | working hard without travelling |
+| other | slow, uniform set | low | short | drill and kick share one class |
 
 Breaststroke and a weak backstroke are indistinguishable on pace and sit in opposite
-corners on cost — which is the whole reason for the second axis.
+corners on cost — which is the whole reason for the second axis. Butterfly and
+backstroke then sit in the *same* corner on both, and rest is what parts them: rest
+is a decision the swimmer makes about how much recovery the work needs, so the set
+that bought more of it cost more to swim. Rest also stops a slow set taken on long
+rest being filed as drill, which is work misread as recovery.
+
+**Set size is not a fourth axis.** A set of one or two lengths has no usable median or
+spread, so every rule that reads a set statistic is reading noise there. Size does not
+name a stroke; it lowers the confidence attached to the call that used it.
 
 **It says "undetermined".** Where the evidence doesn't separate two classes, that is
 the answer. On the full dataset 6% of lengths come back undetermined rather than
@@ -209,6 +232,50 @@ written to `model_params`, so they tighten as workouts are synced. Keeping the m
 in the database rather than a pickle makes it inspectable and diffable, and it is
 where ground-truth labels would pin the clusters if any were ever supplied.
 
+## Medley: the one place stroke order is known
+
+Everything above infers a stroke from how a length was swum. An individual medley is
+different — fly, back, breast, free, always in that order — which makes it a
+**structural** signal. Recognise the repeating four-part shape and every leg is named
+without asking the classifier at all, at higher confidence than the pace rules can
+offer.
+
+Both shapes a swimmer writes down are read: `4x100 IM`, where each rep is a whole
+medley, and `16x25 IM`, where the medley is broken across four reps off the wall. The
+evidence is the same either way — four positions that stay consistently different
+from each other across rounds, rather than wobbling around one number, with freestyle
+the fastest of the four because it comes last.
+
+Three things it refuses to claim:
+
+- **A single four-part round.** Four lengths that happen to descend are
+  indistinguishable from one medley, so at least two rounds are required and a one-off
+  IM is left unlabelled rather than guessed at.
+- **Any ordering between back and breast.** Which of them is slower is a fact about
+  the individual swimmer, and assuming it is exactly the assumption this project
+  refuses to make everywhere else.
+- **A total that is not 100, 200 or 400.** Four 75s share the period-four shape and
+  total 300, which is not an event anyone swims.
+
+Medleys are ranked as their own events. A 100 IM belongs beside other 100 IMs, not
+beside 100 frees, and a continuous round no longer competes for the single-stroke
+best of whichever leg happened to be its mode — that had a 100 IM standing as the 100
+backstroke record. A leg of a *broken* medley stays eligible, since a 25 off the wall
+is a 25 either way. 28 rounds across the history.
+
+## Personal bests, at distances that mean something
+
+A practice throws off a fastest time at every distance a set happens to be written
+at — 75s, 125s, 150s — and burying the 100 free among them makes the table
+unreadable. The bests page leads with the distances each stroke is actually **raced**
+at in short-course yards, one tab per stroke plus one for medley, and keeps the other
+47 one click away rather than discarding them: they are still this swimmer's own
+fastest times.
+
+25 yd is included although it is not an event. It is the pool's own unit and this
+swimmer's most common rep, and leaving it out would empty the table it is meant to
+clarify.
+
 ## Architecture
 
 | Module | Responsibility |
@@ -217,9 +284,9 @@ where ground-truth labels would pin the clusters if any were ever supplied.
 | `client` | Flow's private API — walks the calendar's **100-day cap**, retries 5xx, rate limits, and catches the HTML login page Flow serves with a 200 when a session lapses |
 | `parse` | Pure transformation: ISO-8601 durations, per-length records, HR arrays |
 | `models` | Schema as SQLAlchemy Core tables |
-| `db` | Idempotent upserts, transactional loads |
+| `db` | Idempotent upserts, transactional loads, additive schema migration |
 | `sync` | Discover, skip stored, fetch, parse, load |
-| `analyze` | Sets, merge repair, features, classification, learned parameters |
+| `analyze` | Sets, turn-defect repair, features, classification, medley detection, learned parameters |
 | `render` | Unicode cards |
 | `report` | pandas aggregation over a date range |
 | `ai` | Optional Claude review of one session |
@@ -250,6 +317,14 @@ model_params                                     learned parameters, refined ove
 - **Declared once in SQLAlchemy Core**, so the same schema targets Postgres by
   changing the URL: `--db postgresql+psycopg://host/polarswim`. A test compiles
   every table against the Postgres dialect to catch SQLite-only constructs.
+- **A new column reaches an existing database.** `create_all` creates missing tables
+  but never alters one that already exists, so adding a column would otherwise leave
+  every already-synced database a column short — a failure that surfaces much later
+  as an error on a column the code is certain exists. Connecting runs an additive
+  migration that adds missing nullable columns, and deliberately refuses to guess at
+  anything more invasive: a dropped column, a changed type, a new primary key raise
+  `SchemaDrift` instead. The fix for those is `polarswim reparse`, which rebuilds
+  every derived table from the stored raw payloads with no network and no credential.
 
 ## AI review
 
