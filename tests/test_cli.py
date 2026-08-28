@@ -188,3 +188,14 @@ class TestSparkIsOptional:
         import pandas as pd
         with pytest.raises(RuntimeError, match="requirements-spark"):
             spark.set_aggregates(pd.DataFrame())
+
+
+class TestSyncRunsTheAnalysis:
+    """Fetching without classifying leaves the database internally inconsistent."""
+
+    def test_sync_accepts_the_opt_out_flag(self):
+        args = cli.build_parser().parse_args(["sync", "--no-analyze"])
+        assert args.no_analyze is True
+
+    def test_analysis_is_on_by_default(self):
+        assert cli.build_parser().parse_args(["sync"]).no_analyze is False

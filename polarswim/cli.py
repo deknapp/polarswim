@@ -104,6 +104,18 @@ def cmd_sync(args) -> int:
     print(f"\n{res}")
     for tid, err in res.failures[:10]:
         print(f"  failed {tid}: {err}")
+
+    # Analysis is the other half of a sync. Fetching leaves new lengths with no
+    # stroke labels at all, and re-fetching an existing session replaces its
+    # lengths and cascades its old labels away, so a bare sync ends with the
+    # database holding fewer predictions than lengths. Closing that gap is not
+    # optional work the user should have to remember; --no-analyze is there for
+    # a backfill where re-learning after every window is wasted effort.
+    if res.fetched and not args.no_analyze:
+        print()
+        result = analyze.analyze(engine)
+        print(f"analyzed {result.n_lengths:,} lengths "
+              f"({len(result.repairs)} repaired, {len(result.im_rounds)} medley rounds)")
     print()
     return cmd_status(args, engine)
 
@@ -264,6 +276,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true")
     s.add_argument("--cookie", default=None)
     s.add_argument("--interval", type=float, default=0.4)
+    s.add_argument("--no-analyze", action="store_true",
+                   help="fetch only; leave the new lengths unclassified")
     s.set_defaults(func=cmd_sync)
 
     st = sub.add_parser("status", help="what's in the database")
