@@ -1,0 +1,32 @@
+#!/bin/sh
+# Launcher so `polarswim ...` works from anywhere, without activating anything.
+#
+# The dependencies live in the project's virtualenv, and macOS ships only
+# `python3` with none of them — so `python -m polarswim` fails with either
+# "command not found" or a missing pandas, depending on what is on PATH. This
+# resolves its own location and runs the interpreter that actually has them.
+#
+# Symlink it onto your PATH:  ln -s "$PWD/bin/polarswim" ~/.local/bin/polarswim
+# The symlink is followed to the real file, so the venv is always found.
+set -e
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname "$self")/$link ;;
+    esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+
+if [ -x "$root/.venv/bin/python" ]; then
+    # The package is run from the source tree rather than installed into the
+    # venv, so it is only importable when the project root is on the path. That
+    # happens implicitly when the shell is already in it, which is exactly why
+    # this worked from the project directory and nowhere else.
+    PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" \
+        exec "$root/.venv/bin/python" -m polarswim "$@"
+fi
+echo "polarswim: no virtualenv at $root/.venv" >&2
+echo "create one with:  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+exit 1

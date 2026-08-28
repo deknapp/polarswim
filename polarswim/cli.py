@@ -1,6 +1,7 @@
 """Command line entry point.
 
     polarswim sync [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N] [--force]
+    polarswim sync [--cookie-source auto] [--no-analyze]
     polarswim status
     polarswim analyze [--workout ID]
     polarswim card <date|id|latest>   Strava-pasteable Unicode card

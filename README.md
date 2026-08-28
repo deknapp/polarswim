@@ -13,17 +13,26 @@ This recovers the per-length data from the same private endpoint the web app use
 loads it into a queryable database, and infers the stroke Polar couldn't.
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# Put `polarswim` on your PATH. macOS ships only `python3`, without these
+# dependencies, so `python -m polarswim` finds either no interpreter or no
+# pandas; the launcher resolves the project's own virtualenv from anywhere.
+ln -s "$PWD/bin/polarswim" ~/.local/bin/polarswim
 
 # Everything below runs against the committed sample database — no account needed.
-python -m polarswim --db sample/sample.db status
-python -m polarswim --db sample/sample.db analyze
-python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
-python -m polarswim --db sample/sample.db report --from 2026-08-01
-python -m polarswim --db sample/sample.db serve               # web UI on :8770
+polarswim --db sample/sample.db status
+polarswim --db sample/sample.db analyze
+polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
+polarswim --db sample/sample.db report --from 2026-08-01
+polarswim --db sample/sample.db serve                # web UI on :8770
 
-pytest -q                                                    # 269 tests, no network
+.venv/bin/pytest -q                                 # 269 tests, no network
 ```
+
+Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
+run from the project directory.
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
 This is my own training data, already published publicly on Strava, so there is no
@@ -149,9 +158,9 @@ Commands that act on one session take a **date**, a Polar training id, or `lates
 nobody remembers a training id:
 
 ```
-python -m polarswim card 2026-08-19
-python -m polarswim card latest
-python -m polarswim review 2026-08-19
+polarswim card 2026-08-19
+polarswim card latest
+polarswim review 2026-08-19
 ```
 
 Two swims on the same day makes the date ambiguous, so it lists the candidates
@@ -160,7 +169,7 @@ instead of silently picking one.
 ## Web UI
 
 ```
-python -m polarswim serve
+polarswim serve
 ```
 
 Then open **http://127.0.0.1:8770**. Swims are listed newest first; picking one shows
@@ -295,6 +304,7 @@ clarify.
 | `ai` | Optional Claude review of one session |
 | `web` | Local Flask UI |
 | `spark` | Optional PySpark path (see below) |
+| `bin/polarswim` | Launcher that finds the project's virtualenv from any directory |
 
 ## Schema
 
@@ -352,10 +362,11 @@ frame for `spark.read.jdbc` is the only change.
 ## Syncing your own data
 
 ```bash
-python -m polarswim sync --from 2024-01-01
+polarswim sync
 ```
 
-If you are signed in to Flow in Chrome, that is the whole procedure. Sync borrows
+If you are signed in to Flow in Chrome, that is the whole procedure. It picks up
+everything since your last sync; `--from 2024-01-01` backfills further. Sync borrows
 the session the browser already has, and runs the analysis when it finishes.
 
 **Why that takes any work at all.** Flow has no public API here, and it hands its
