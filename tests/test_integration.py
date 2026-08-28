@@ -274,14 +274,22 @@ class TestPersonalBestsPage:
         for stroke in ("freestyle", "backstroke", "breaststroke", "butterfly", "IM"):
             assert stroke in page
 
-    def test_a_medley_best_carries_its_splits_and_its_form(self, client):
-        prs = client.get("/api/prs").get_json()["prs"]
-        medleys = [p for p in prs if p["stroke"] == "IM"]
-        if not medleys:
-            pytest.skip("no medley rounds in the sample database")
-        for m in medleys:
-            assert len(m["splits_s"]) == 4
-            assert m["form"] in ("continuous", "broken")
+    def test_a_medley_best_carries_its_splits_and_its_form(self):
+        """Built from a reference rather than the sample database, which holds no
+        medleys — a data-dependent skip is a test that never runs."""
+        from polarswim import db, metrics, report
+
+        ref = metrics.SwimmerReference(hr_max=172, median_pace_s=26.0)
+        ref.best_im = {100: {"seconds": 92.8, "workout_id": 1, "date": "2026-02-27",
+                             "continuous": True, "splits_s": [28.8, 23.2, 24.0, 16.8],
+                             "n_rounds": 6}}
+        rows = report.personal_bests(db.connect(":memory:"), ref)
+        medley = [r for r in rows if r["stroke"] == "IM"]
+        assert len(medley) == 1
+        assert medley[0]["splits_s"] == [28.8, 23.2, 24.0, 16.8]
+        assert medley[0]["form"] == "continuous"
+        assert medley[0]["competitive"] is True
+        assert medley[0]["pace_per_25"] == pytest.approx(23.2)
 
     def test_a_single_stroke_best_has_no_medley_fields(self, client):
         prs = client.get("/api/prs").get_json()["prs"]
