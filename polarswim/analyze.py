@@ -570,19 +570,27 @@ def label_im(df: pd.DataFrame, rounds: list[IMRound]) -> pd.DataFrame:
     what makes it a medley — so these labels carry higher confidence than anything
     the pace/cost rules produce.
     """
+    df = df.copy()
+    df["im_continuous"] = False
     if not rounds:
         return df
-    df = df.copy()
     labels: dict[tuple[int, int], str] = {}
+    continuous: set[tuple[int, int]] = set()
     for rnd in rounds:
         per_leg = max(1, len(rnd.idxs) // 4)
         for pos, stroke in enumerate(IM_ORDER):
             for idx in rnd.idxs[pos * per_leg:(pos + 1) * per_leg]:
                 labels[(rnd.workout_id, idx)] = stroke
+        if rnd.continuous:
+            continuous.update((rnd.workout_id, i) for i in rnd.idxs)
     key = list(zip(df["workout_id"], df["idx"]))
     hit = [k in labels for k in key]
     df.loc[hit, "predicted"] = [labels[k] for k in key if k in labels]
     df.loc[hit, "confidence"] = 0.85
+    # A rep that is a whole medley is not a rep of any one stroke, so it must not
+    # compete for the 100 backstroke best just because backstroke was its mode.
+    # A leg of a BROKEN medley is a genuine 25 off the wall and stays eligible.
+    df["im_continuous"] = [k in continuous for k in key]
     return df
 
 

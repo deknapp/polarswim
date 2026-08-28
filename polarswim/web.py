@@ -61,6 +61,9 @@ PAGE = """<!doctype html>
          border-radius:3px;overflow:hidden;vertical-align:middle;margin-right:5px}
  .pctbar i{display:block;height:100%}
  .pr{color:#f0a848;font-weight:700}
+ /* A bests table has few, short columns; letting it fill a wide window strands
+    the date a screen away from the time it belongs to. */
+ .narrow{max-width:720px}
  .tab{background:transparent;color:var(--dim);border:1px solid transparent;
       font-weight:600;padding:6px 12px;margin-right:4px}
  .tab.on{background:var(--panel);color:var(--fg);border-color:var(--line)}
@@ -266,29 +269,72 @@ async function loadSummary(){
        artifacts.</div>
    </div>`;
 }
+const PR_STROKES=['freestyle','backstroke','breaststroke','butterfly','IM','other'];
+const PR_LABEL={freestyle:'free',backstroke:'back',breaststroke:'breast',
+                butterfly:'fly',IM:'IM',other:'other'};
+let prData=null, prStroke='freestyle', prAll=false;
+
 async function loadPRs(){
   $('#main').innerHTML='<div class="card dim">loading…</div>';
-  const d=await (await fetch('/api/prs')).json();
-  const byDist={};
-  d.prs.forEach(p=>{ (byDist[p.yards]=byDist[p.yards]||[]).push(p); });
-  $('#main').innerHTML=`<div class="card">
-    <h2>personal bests by distance and stroke</h2>
-    <table><tr><th>distance</th><th>stroke</th><th>best</th><th>pace/25</th>
-      <th>date</th><th>attempts</th></tr>
-    ${Object.keys(byDist).sort((a,b)=>a-b).map(dist=>
-      byDist[dist].sort((a,b)=>a.seconds-b.seconds).map((p,i)=>`<tr>
-        <td>${i===0?`<b>${p.yards} yd</b>`:''}</td>
-        <td>${p.stroke}</td>
-        <td><b>${fmtTime(p.seconds)}</b></td>
-        <td class="dim">${p.pace_per_25.toFixed(1)}s</td>
-        <td class="dim">${p.date}</td>
-        <td class="dim">${p.n_attempts}</td></tr>`).join('')).join('')}
-    </table>
-    <div class="dim" style="font-size:12px;margin-top:12px">
-      Stroke is inferred from pace and heart rate, not measured, so a best is
-      provisional. Reps faster than 65% of the median pace are excluded as
-      turn-detection artifacts.</div>
-  </div>`;
+  prData=(await (await fetch('/api/prs')).json()).prs;
+  // "other" and "undetermined" are both work the classifier could not name, and
+  // splitting them across two tabs would imply a distinction that isn't there.
+  prData.forEach(p=>{p.tab = PR_STROKES.includes(p.stroke)?p.stroke:'other';});
+  if(!prData.some(p=>p.tab===prStroke)) prStroke='freestyle';
+  renderPRs();
+}
+function pickStroke(s){ prStroke=s; renderPRs(); }
+function toggleAll(){ prAll=!prAll; renderPRs(); }
+
+function renderPRs(){
+  const inTab=prData.filter(p=>p.tab===prStroke);
+  const shown=(prAll?inTab:inTab.filter(p=>p.competitive))
+                .sort((a,b)=>a.yards-b.yards);
+  const hidden=inTab.length-inTab.filter(p=>p.competitive).length;
+  const isIM=prStroke==='IM';
+
+  const counts={};
+  PR_STROKES.forEach(s=>{counts[s]=prData.filter(p=>p.tab===s&&
+    (prAll||p.competitive)).length;});
+
+  $('#main').innerHTML=`
+   <div class="card narrow">
+     <nav style="margin-bottom:14px">
+       ${PR_STROKES.filter(s=>prData.some(p=>p.tab===s)).map(s=>
+         `<button class="tab ${s===prStroke?'on':''}" onclick="pickStroke('${s}')">
+            ${PR_LABEL[s]} <span class="dim">${counts[s]}</span></button>`).join('')}
+     </nav>
+     <h2>${PR_LABEL[prStroke]} — personal bests</h2>
+     ${shown.length?`<table>
+       <tr><th>distance</th><th>best</th><th>pace/25</th>
+           ${isIM?'<th>splits <span class="dim">fly · back · breast · free</span></th><th>form</th>':''}
+           <th>date</th><th>attempts</th></tr>
+       ${shown.map(p=>`<tr>
+         <td><b>${p.yards} yd</b></td>
+         <td><b>${fmtTime(p.seconds)}</b></td>
+         <td class="dim">${p.pace_per_25.toFixed(1)}s</td>
+         ${isIM?`<td class="dim">${(p.splits_s||[]).map(x=>x.toFixed(1)).join(' · ')}</td>
+                 <td class="dim">${p.form||''}</td>`:''}
+         <td class="dim">${p.date}</td>
+         <td class="dim">${p.n_attempts}</td></tr>`).join('')}
+     </table>`:'<div class="dim">nothing recorded at these distances yet.</div>'}
+     <div style="margin-top:14px">
+       <button class="alt" onclick="toggleAll()">
+         ${prAll?'show racing distances only':`show all distances${hidden?` (+${hidden})`:''}`}
+       </button>
+     </div>
+     <div class="dim" style="font-size:12px;margin-top:12px">
+       ${prAll?`Every distance a set happened to be written at, including the 75s and
+         125s a practice throws off.`
+        :`Distances this stroke is actually raced at, short course yards.`}
+       Stroke is inferred from pace, heart rate and rest, not measured, so a best is
+       provisional. Reps faster than 65% of the median pace are excluded as
+       turn-detection artifacts.
+       ${isIM?`<br>A medley is recognised by its repeating four-part shape, so its
+         strokes are known rather than inferred. <b>continuous</b> was swum unbroken;
+         <b>broken</b> was four reps off the wall, which is the quicker of the two.`:''}
+     </div>
+   </div>`;
 }
 async function loadReport(){
   const q=new URLSearchParams();

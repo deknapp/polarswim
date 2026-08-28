@@ -60,6 +60,27 @@ SPEED_COLORS = [
 MIN_OBSERVATIONS = 30      # distance-only fallback needs this many reps
 MIN_OBSERVATIONS_STROKE = 15   # a distance/stroke pair is narrower, so accept fewer
 
+# The distances actually raced in a 25 yd pool. A practice throws off bests at
+# every distance a set happens to be written at — 75s, 125s, 150s — and burying
+# the 100 free among them makes the table unreadable. These are the ones that
+# mean something; the rest stay available behind a toggle rather than being
+# discarded, since they are still this swimmer's own fastest times.
+COMPETITIVE_YARDS = {
+    "freestyle":    (25, 50, 100, 200, 500, 1000, 1650),
+    "backstroke":   (25, 50, 100, 200),
+    "breaststroke": (25, 50, 100, 200),
+    "butterfly":    (25, 50, 100, 200),
+    "IM":           (100, 200, 400),
+}
+# 25 is not an event, but it is the pool's own unit and this swimmer's most
+# common rep, so leaving it out would empty the table it is meant to clarify.
+DEFAULT_COMPETITIVE = (25, 50, 100, 200)
+
+
+def is_competitive(yards: int, stroke: str) -> bool:
+    """Is this a distance the stroke is actually raced at?"""
+    return int(yards) in COMPETITIVE_YARDS.get(stroke, DEFAULT_COMPETITIVE)
+
 # Edwards TRIMP zone weights, kept for the time-in-zone breakdown.
 ZONE_WEIGHTS = {"Z1": 1, "Z2": 2, "Z3": 3, "Z4": 4, "Z5": 5}
 
@@ -90,6 +111,10 @@ class SwimmerReference:
     best_rep: dict[tuple[int, str], dict] = field(default_factory=dict)
     median_pace_s: float = 0.0
     implausible_reps: int = 0      # excluded from bests as sensor artifacts
+    # Medley rounds are ranked separately from single-stroke reps: a 100 IM and a
+    # 100 free are different events, and pooling them would rank neither.
+    im_times_by_distance: dict[int, np.ndarray] = field(default_factory=dict)
+    best_im: dict[int, dict] = field(default_factory=dict)
 
     # --- heart rate ---------------------------------------------------------
     def zone_bounds(self) -> list[dict]:
@@ -250,8 +275,25 @@ def build_reference(engine: Engine, lengths_df: pd.DataFrame) -> SwimmerReferenc
 
     # Fastest rep per (distance, stroke). A rep's stroke is the majority label of
     # its lengths, and its time is the sum of them.
-    reps = (lengths_df.groupby(["workout_id", "rep_id"])
-            .agg(lengths=("idx", "size"), seconds=("duration_s", "sum"),
+    # A rep's distance is how many real lengths it covers, which is not the same
+    # as how many records the sensor wrote for it. A merged record is one row
+    # covering two lengths; a split pair is two rows covering one. Counting rows
+    # would file those reps under the wrong distance entirely.
+    if "length_factor" not in lengths_df.columns:
+        lengths_df = lengths_df.assign(length_factor=1.0)
+    single_stroke = lengths_df
+    if "im_continuous" in lengths_df.columns:
+        # Reps that are themselves a medley are ranked as medleys, below.
+        medley_reps = (lengths_df.loc[lengths_df["im_continuous"],
+                                      ["workout_id", "rep_id"]]
+                       .drop_duplicates())
+        if len(medley_reps):
+            single_stroke = lengths_df.merge(
+                medley_reps.assign(_im=True), on=["workout_id", "rep_id"],
+                how="left")
+            single_stroke = single_stroke[single_stroke["_im"].isna()]
+    reps = (single_stroke.groupby(["workout_id", "rep_id"])
+            .agg(lengths=("length_factor", "sum"), seconds=("duration_s", "sum"),
                  pool_m=("pool_m", "first"),
                  stroke=("predicted", lambda s: s.mode().iloc[0] if len(s.mode()) else "undetermined"),
                  start=("start_time", "first"))
@@ -285,8 +327,49 @@ def build_reference(engine: Engine, lengths_df: pd.DataFrame) -> SwimmerReferenc
             "date": str(row["start"])[:10],
         }
 
+    _load_medley_bests(ref, lengths_df)
     _load_training_load(engine, ref)
     return ref
+
+
+def _load_medley_bests(ref: SwimmerReference, lengths_df: pd.DataFrame) -> None:
+    """Rank medley rounds as their own events.
+
+    A 100 IM belongs beside other 100 IMs, not beside 100 frees — pooling them
+    would put every medley at the bottom of a freestyle field and tell the swimmer
+    nothing. Continuous and broken rounds are ranked together, with each best
+    recording which it was, because a broken 100 IM off four walls is genuinely
+    quicker than swimming it straight and the table should not hide that.
+    """
+    from . import analyze
+
+    # Medley detection reads the set structure. A frame assembled without it -
+    # the rep-level fixtures in the tests, an older caller - simply has no
+    # medleys to report rather than failing.
+    if not {"set_id", "idx", "pool_m"} <= set(lengths_df.columns):
+        return
+    rounds = analyze.detect_im(lengths_df)
+    if not rounds:
+        return
+
+    by_distance: dict[int, list] = {}
+    for rnd in rounds:
+        by_distance.setdefault(rnd.yards, []).append(rnd)
+
+    dates = (lengths_df.drop_duplicates("workout_id")
+             .set_index("workout_id")["start_time"].to_dict())
+    for yards, group in by_distance.items():
+        ref.im_times_by_distance[yards] = np.sort(
+            np.array([r.seconds for r in group]))
+        fastest = min(group, key=lambda r: r.seconds)
+        ref.best_im[yards] = {
+            "seconds": float(fastest.seconds),
+            "workout_id": int(fastest.workout_id),
+            "date": str(dates.get(fastest.workout_id, ""))[:10],
+            "continuous": bool(fastest.continuous),
+            "splits_s": [round(x, 1) for x in fastest.splits_s],
+            "n_rounds": len(group),
+        }
 
 
 def _load_training_load(engine: Engine, ref: SwimmerReference) -> None:

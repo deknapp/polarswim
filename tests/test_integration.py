@@ -242,3 +242,49 @@ class TestSummaryAndPRTabs:
         for token in ('data-tab="workouts"', 'data-tab="summary"',
                       'data-tab="prs"', "function loadSummary", "function loadPRs"):
             assert token in page, f"dashboard is missing {token}"
+
+
+class TestPersonalBestsPage:
+    """Bests are grouped by stroke, lead with racing distances, and include medleys."""
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    def test_every_best_says_whether_its_distance_is_raced(self, client):
+        prs = client.get("/api/prs").get_json()["prs"]
+        assert prs and all("competitive" in p for p in prs)
+
+    def test_racing_distances_are_a_subset_of_everything_recorded(self):
+        from polarswim import metrics
+        assert metrics.is_competitive(100, "freestyle")
+        assert metrics.is_competitive(1650, "freestyle")
+        assert not metrics.is_competitive(75, "freestyle")
+        assert not metrics.is_competitive(1650, "butterfly")   # not an event
+
+    def test_medley_distances_are_only_the_three_that_exist(self):
+        from polarswim import metrics
+        assert metrics.is_competitive(200, "IM")
+        assert not metrics.is_competitive(50, "IM")            # no 50 IM
+        assert not metrics.is_competitive(300, "IM")
+
+    def test_the_page_offers_a_tab_for_every_stroke_and_for_medley(self, client):
+        page = client.get("/").data.decode()
+        assert "PR_STROKES" in page
+        for stroke in ("freestyle", "backstroke", "breaststroke", "butterfly", "IM"):
+            assert stroke in page
+
+    def test_a_medley_best_carries_its_splits_and_its_form(self, client):
+        prs = client.get("/api/prs").get_json()["prs"]
+        medleys = [p for p in prs if p["stroke"] == "IM"]
+        if not medleys:
+            pytest.skip("no medley rounds in the sample database")
+        for m in medleys:
+            assert len(m["splits_s"]) == 4
+            assert m["form"] in ("continuous", "broken")
+
+    def test_a_single_stroke_best_has_no_medley_fields(self, client):
+        prs = client.get("/api/prs").get_json()["prs"]
+        for p in prs:
+            if p["stroke"] != "IM":
+                assert p["form"] is None and p["splits_s"] is None

@@ -197,22 +197,47 @@ def overall_summary(engine: Engine, ref) -> dict:
 
 
 def personal_bests(engine: Engine, ref) -> list[dict]:
-    """Every distance/stroke best, newest-first within distance."""
-    heads = workout_headers(engine).set_index("id")
+    """Every best the history supports, single-stroke and medley alike.
+
+    Each row carries whether its distance is one the stroke is actually raced at,
+    so the UI can lead with the events that mean something without throwing away
+    the rest — a fastest 75 is still this swimmer's fastest 75.
+    """
+    from . import metrics
+
     out = []
     for (yards, stroke), best in ref.best_rep.items():
-        wid = best["workout_id"]
         out.append({
             "yards": int(yards),
             "stroke": stroke,
             "seconds": round(best["seconds"], 1),
             "pace_per_25": round(best["seconds"] / (yards / 25.0), 1),
             "date": best["date"],
-            "workout_id": int(wid),
+            "workout_id": int(best["workout_id"]),
             "n_attempts": int(len(ref.rep_times_by_distance_stroke.get(
                 (int(yards), stroke), []))),
+            "competitive": metrics.is_competitive(yards, stroke),
+            "form": None,
+            "splits_s": None,
         })
-    out.sort(key=lambda r: (r["yards"], r["stroke"]))
+
+    for yards, best in getattr(ref, "best_im", {}).items():
+        out.append({
+            "yards": int(yards),
+            "stroke": "IM",
+            "seconds": round(best["seconds"], 1),
+            "pace_per_25": round(best["seconds"] / (yards / 25.0), 1),
+            "date": best["date"],
+            "workout_id": int(best["workout_id"]),
+            "n_attempts": int(best["n_rounds"]),
+            "competitive": metrics.is_competitive(yards, "IM"),
+            # A broken medley off four walls is quicker than one swum straight,
+            # so the two are labelled rather than silently compared.
+            "form": "continuous" if best["continuous"] else "broken",
+            "splits_s": best["splits_s"],
+        })
+
+    out.sort(key=lambda r: (r["stroke"], r["yards"]))
     return out
 
 
