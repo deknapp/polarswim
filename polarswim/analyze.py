@@ -117,7 +117,11 @@ def load_lengths(engine: Engine, workout_id: int | None = None) -> pd.DataFrame:
         return df
 
     derived = df["distance_m"] / df["n_lengths"].replace(0, np.nan)
-    df["pool_m"] = df["pool_length_m"].fillna(derived)
+    # Both cast to float first: where every pool_length_m is NULL the column
+    # arrives as object dtype, and filling it then silently downcasts — which
+    # pandas deprecates and will stop doing.
+    df["pool_m"] = (df["pool_length_m"].astype(float)
+                    .fillna(derived.astype(float)))
     df = df[df["pool_m"].notna() & (df["pool_m"] > 0)].copy()
     df["pace_s"] = df["duration_s"] * (REFERENCE_LENGTH_M / df["pool_m"])
     return df

@@ -361,28 +361,49 @@ async function loadFix(){
 function renderFix(d,l){
   const acc=l.accuracy||{};
   const counts=Object.entries(l.counts||{}).sort((a,b)=>b[1]-a[1]);
+  const opts=(sel)=>FIX_STROKES.map(x=>
+    `<option value="${x}" ${sel===x?'selected':''}>${x}</option>`).join('');
+
   $('#main').innerHTML=`
    <div class="card">
      <h2>corrections — ${d.header.date}</h2>
      <div class="dim" style="font-size:12px;margin-bottom:12px">
-       Set the stroke for any set the classifier got wrong. One choice labels every
-       length in that set; <b>IM</b> fills in fly · back · breast · free across each
-       round. Your corrections outrank the classifier everywhere and survive
-       re-analysis, so a set you fix stays fixed.
+       Each interval gets its own dropdown, because a set is only a run of equal
+       distances — swim four 50s free then three breast and that is one set, but
+       not one stroke. The control on the set row sets every interval below it at
+       once, for when it really was all the same. <b>IM</b> fills in
+       fly · back · breast · free within an interval. Corrections outrank the
+       classifier everywhere and survive re-analysis.
      </div>
-     <table><tr><th>set</th><th>reps</th><th>inferred</th><th>conf</th>
-       <th>time</th><th>pace/50</th><th>your correction</th></tr>
-     ${d.sets.map(s=>`<tr>
-       <td>${s.set_id}</td><td><b>${s.reps}×${s.rep_yards}</b></td>
-       <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
-       <td class="dim">${s.confidence.toFixed(2)}</td>
-       <td>${fmtTime(s.rep_seconds)}</td>
-       <td class="dim">${s.pace_50_s.toFixed(0)}s</td>
-       <td><select id="fx${s.set_id}" onchange="markDirty()">
-         <option value="">— leave as inferred —</option>
-         ${FIX_STROKES.map(x=>`<option value="${x}"
-            ${l.sets[s.set_id]===x?'selected':''}>${x}</option>`).join('')}
-       </select></td></tr>`).join('')}
+     <table>
+       <tr><th></th><th>interval</th><th>inferred</th><th>time</th>
+           <th>rest</th><th>your correction</th></tr>
+     ${d.sets.map(s=>`
+       <tr style="background:var(--bg)">
+         <td><b>set ${s.set_id}</b></td>
+         <td><b>${s.reps}×${s.rep_yards}</b></td>
+         <td class="${s.confidence<0.4?'lo':''}">${s.stroke}
+           ${s.mixed?'<span class="dim">(mixed)</span>':''}</td>
+         <td>${fmtTime(s.rep_seconds)}</td>
+         <td class="dim">${s.rest_before_s.toFixed(0)}s</td>
+         <td><select onchange="setAll(${s.set_id},this.value)">
+           <option value="">— set all below —</option>${opts(null)}
+         </select></td>
+       </tr>
+       ${s.reps_detail.map((r,i)=>`
+         <tr>
+           <td></td>
+           <td class="dim" style="padding-left:22px">#${i+1} · ${r.yards} yd</td>
+           <td class="dim">${r.stroke}</td>
+           <td class="dim">${fmtTime(r.seconds)}</td>
+           <td class="dim">${r.rest_before_s.toFixed(0)}s</td>
+           <td><select id="fx${s.set_id}:${r.rep_id}" data-set="${s.set_id}"
+                       onchange="markDirty()">
+             <option value="">— leave as inferred —</option>
+             ${opts(l.reps[s.set_id+':'+r.rep_id])}
+           </select></td>
+         </tr>`).join('')}
+     `).join('')}
      </table>
      <div style="margin-top:14px">
        <button onclick="saveFix()">save corrections</button>
@@ -409,21 +430,25 @@ function renderFix(d,l){
            <td class="${c.actual!==c.predicted?'lo':''}">${c.predicted}</td>
            <td class="dim">${c.n}</td></tr>`).join('')}</table>`:''}`
       :`<div class="dim" style="font-size:12px">
-         ${acc.reason||''} Accuracy can only be reported once there are corrections
+         ${acc.reason||''}. Accuracy can only be reported once there are corrections
          to hold out — without ground truth it is not measurable at all, which is
          the honest position this tool started from.</div>`}
    </div>`;
 }
+function setAll(setId,value){
+  document.querySelectorAll(`[data-set="${setId}"]`).forEach(el=>{el.value=value;});
+  markDirty();
+}
 function markDirty(){ $('#fixnote').textContent='unsaved changes'; }
 async function saveFix(){
-  const sets={};
+  const reps={};
   document.querySelectorAll('[id^=fx]').forEach(el=>{
-    sets[el.id.slice(2)] = el.value;
+    reps[el.id.slice(2)] = el.value;      // "<set>:<rep>"
   });
   $('#fixnote').textContent='saving and re-analysing…';
   const r=await (await fetch('/api/labels/'+fixWorkout,
     {method:'POST',headers:{'Content-Type':'application/json'},
-     body:JSON.stringify({sets})})).json();
+     body:JSON.stringify({reps})})).json();
   $('#fixnote').textContent=`saved ${r.saved} lengths — model refitted`;
   loadFix();
 }
@@ -531,42 +556,61 @@ def create_app(db_url=None) -> Flask:
 
     @app.post("/api/labels/<int:wid>")
     def save_labels(wid: int):
-        """Record corrections for one workout, set by set.
+        """Record corrections for one workout, interval by interval.
 
-        A set is the unit because it is the unit a swimmer remembers: one answer
-        labels every length in it. `IM` expands across each round in stroke order,
-        which is the only place in this app where order is a fact rather than an
-        inference.
+        A **rep** is the unit, not a set. A set is only a run of equal-distance
+        reps, and a swimmer who did four 50s free and then three breast swam one
+        set by that definition — labelling the whole thing one stroke would make
+        that correction unsayable, and the wrong answer unfixable.
+
+        `sets` is still accepted, and means "every rep in this set", which is what
+        the set-level control sends.
         """
-        from . import learn
         payload = request.get_json(silent=True) or {}
         df = report.classified_lengths(engine, wid)
         if df.empty:
             return jsonify(error="not found"), 404
 
-        rows = []
+        # Flatten both forms into one {(set_id, rep_id): stroke} instruction.
+        wanted: dict[tuple[int, int], str] = {}
+        cleared: set[tuple[int, int]] = set()
         for set_id, stroke in (payload.get("sets") or {}).items():
-            g = df[df["set_id"] == int(set_id)].sort_values("idx")
+            for rid in df[df["set_id"] == int(set_id)]["rep_id"].unique():
+                key = (int(set_id), int(rid))
+                (wanted.__setitem__(key, stroke) if stroke else cleared.add(key))
+        for combined, stroke in (payload.get("reps") or {}).items():
+            set_id, rep_id = (int(x) for x in str(combined).split(":"))
+            key = (set_id, rep_id)
+            (wanted.__setitem__(key, stroke) if stroke else cleared.add(key))
+
+        rows = []
+        for (set_id, rep_id), stroke in wanted.items():
+            g = df[(df["set_id"] == set_id) & (df["rep_id"] == rep_id)]
+            g = g.sort_values("idx")
             if g.empty:
                 continue
-            if not stroke:
-                db.clear_labels(engine, wid, int(set_id))
+            idxs = g["idx"].tolist()
+            if stroke == "IM" and len(idxs) % 4 == 0:
+                per_leg = len(idxs) // 4
+                for pos, leg in enumerate(analyze.IM_ORDER):
+                    rows += [dict(workout_id=wid, idx=int(i), stroke=leg,
+                                  set_id=set_id)
+                             for i in idxs[pos * per_leg:(pos + 1) * per_leg]]
+            elif stroke == "IM":
+                # A medley needs four equal legs; this rep cannot hold one.
                 continue
-            if stroke == "IM":
-                for _, rep in g.groupby("rep_id"):
-                    idxs = rep["idx"].tolist()
-                    per_leg = max(1, len(idxs) // 4)
-                    for pos, leg in enumerate(analyze.IM_ORDER):
-                        for idx in idxs[pos * per_leg:(pos + 1) * per_leg]:
-                            rows.append(dict(workout_id=wid, idx=int(idx),
-                                             stroke=leg, set_id=int(set_id)))
             else:
                 rows += [dict(workout_id=wid, idx=int(i), stroke=stroke,
-                              set_id=int(set_id)) for i in g["idx"]]
+                              set_id=set_id) for i in idxs]
+
+        for set_id, rep_id in cleared:
+            g = df[(df["set_id"] == set_id) & (df["rep_id"] == rep_id)]
+            for i in g["idx"]:
+                db.clear_label(engine, wid, int(i))
 
         saved = db.save_labels(engine, rows)
-        # Refit immediately: a correction that only takes effect on some later
-        # command has not "stuck" in any sense the person making it would accept.
+        # Refit immediately: a correction that only lands on some later command
+        # has not "stuck" in any sense the person making it would accept.
         analyze.analyze(engine)
         _ref_cache.clear()
         return jsonify(saved=saved, counts=db.label_counts(engine))
@@ -575,15 +619,18 @@ def create_app(db_url=None) -> Flask:
     def workout_labels(wid: int):
         labels = db.load_labels(engine, wid)
         df = report.classified_lengths(engine, wid)
-        by_set = {}
+        by_rep = {}
         if not df.empty:
-            for sid, g in df.groupby("set_id"):
-                marked = {labels.get((wid, int(i))) for i in g["idx"]}
-                marked.discard(None)
-                if marked:
-                    by_set[int(sid)] = ("IM" if len(marked) >= 3
-                                        else sorted(marked)[0])
-        return jsonify(sets=by_set, counts=db.label_counts(engine),
+            for (sid, rid), g in df.groupby(["set_id", "rep_id"]):
+                marked = [labels.get((wid, int(i))) for i in g["idx"]]
+                present = {m for m in marked if m}
+                if not present:
+                    continue
+                # Four distinct strokes across one rep is a medley, and reads
+                # better as "IM" than as whichever leg sorts first.
+                by_rep[f"{int(sid)}:{int(rid)}"] = ("IM" if len(present) >= 3
+                                                    else sorted(present)[0])
+        return jsonify(reps=by_rep, counts=db.label_counts(engine),
                        accuracy=_accuracy())
 
     def _accuracy():

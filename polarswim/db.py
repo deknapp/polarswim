@@ -276,6 +276,13 @@ def clear_labels(engine: Engine, workout_id: int, set_id: int | None = None) -> 
         return c.execute(stmt).rowcount
 
 
+def clear_label(engine: Engine, workout_id: int, idx: int) -> int:
+    """Withdraw the correction on one length."""
+    with engine.begin() as c:
+        return c.execute(sa.delete(labels).where(sa.and_(
+            labels.c.workout_id == workout_id, labels.c.idx == idx))).rowcount
+
+
 def load_labels(engine: Engine, workout_id: int | None = None) -> dict:
     """Corrections as {(workout_id, idx): stroke}."""
     stmt = sa.select(labels.c.workout_id, labels.c.idx, labels.c.stroke)

@@ -310,7 +310,8 @@ class TestCorrectionsTab:
         d = client.get(f"/api/workout/{workout_id}").get_json()
         return d["sets"][0]
 
-    def test_correcting_a_set_labels_every_length_in_it(self, client, workout_id, a_set):
+    def test_the_set_control_still_labels_every_interval_at_once(
+            self, client, workout_id, a_set):
         r = client.post(f"/api/labels/{workout_id}",
                         json={"sets": {str(a_set["set_id"]): "butterfly"}})
         assert r.get_json()["saved"] == a_set["n"]
@@ -336,18 +337,37 @@ class TestCorrectionsTab:
         sid = str(a_set["set_id"])
         client.post(f"/api/labels/{workout_id}", json={"sets": {sid: "butterfly"}})
         client.post(f"/api/labels/{workout_id}", json={"sets": {sid: ""}})
-        assert str(a_set["set_id"]) not in client.get(
-            f"/api/labels/{workout_id}").get_json()["sets"]
+        assert client.get(f"/api/labels/{workout_id}").get_json()["reps"] == {}
 
-    def test_correcting_a_set_to_IM_fills_in_the_stroke_order(self, client, workout_id):
+    def test_correcting_one_interval_leaves_the_others_alone(self, client, workout_id):
+        """A set is a run of equal distances, not a promise of one stroke: swim
+        four 50s free then three breast and that is one set."""
         d = client.get(f"/api/workout/{workout_id}").get_json()
-        four = next((s for s in d["sets"] if s["n"] % 4 == 0), None)
-        if four is None:
-            pytest.skip("no set with a length count divisible by four")
+        multi = next((s for s in d["sets"] if s["reps"] >= 2), None)
+        if multi is None:
+            pytest.skip("no set with more than one interval")
+        last = multi["reps_detail"][-1]
         client.post(f"/api/labels/{workout_id}",
-                    json={"sets": {str(four["set_id"]): "IM"}})
-        assert client.get(f"/api/labels/{workout_id}").get_json()[
-            "sets"][str(four["set_id"])] == "IM"
+                    json={"reps": {f"{multi['set_id']}:{last['rep_id']}": "breaststroke"}})
+
+        after = client.get(f"/api/workout/{workout_id}").get_json()
+        row = next(s for s in after["sets"] if s["set_id"] == multi["set_id"])
+        assert row["reps_detail"][-1]["stroke"] == "breaststroke"
+        assert row["reps_detail"][0]["stroke"] != "breaststroke"
+        assert row["mixed"] is True
+
+    def test_an_interval_correction_to_IM_fills_in_the_stroke_order(
+            self, client, workout_id):
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        target = next((( s, r) for s in d["sets"] for r in s["reps_detail"]
+                       if r["lengths"] % 4 == 0), None)
+        if target is None:
+            pytest.skip("no interval with a length count divisible by four")
+        s_row, rep = target
+        client.post(f"/api/labels/{workout_id}",
+                    json={"reps": {f"{s_row['set_id']}:{rep['rep_id']}": "IM"}})
+        got = client.get(f"/api/labels/{workout_id}").get_json()["reps"]
+        assert got[f"{s_row['set_id']}:{rep['rep_id']}"] == "IM"
 
     def test_the_page_offers_the_corrections_tab(self, client):
         page = client.get("/").data.decode()
@@ -358,3 +378,22 @@ class TestCorrectionsTab:
         _db.clear_labels(_db.connect(SAMPLE), workout_id)
         acc = client.get(f"/api/labels/{workout_id}").get_json()["accuracy"]
         assert acc["accuracy"] is None
+
+    def test_a_uniform_set_is_not_flagged_mixed(self, client, workout_id):
+        """Mixed compares intervals, not lengths — one undetermined length in a
+        1250 means one unresolved length, not a set of two strokes."""
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        for s in d["sets"]:
+            strokes = {r["stroke"] for r in s["reps_detail"]}
+            assert s["mixed"] == (len(strokes) > 1)
+
+    def test_a_medley_interval_is_named_IM_not_its_first_leg(self, client):
+        """Same four-way-tie trap as the set label, one level down."""
+        from polarswim import db as _db, metrics, report as _report
+        engine = _db.connect(SAMPLE)
+        ref = metrics.build_reference(engine, _report.classified_lengths(engine))
+        for wid in _report.workout_headers(engine)["id"]:
+            df = _report.classified_lengths(engine, int(wid))
+            for s in _report.sets_for_workout(df, set(), ref):
+                if s["stroke"] == "IM":
+                    assert all(r["stroke"] == "IM" for r in s["reps_detail"])

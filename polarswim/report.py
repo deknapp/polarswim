@@ -89,6 +89,21 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                                              for r in g.itertuples()) else ""
         reps = g.groupby("rep_id")
         n_reps = reps.ngroups
+        detail = [{
+            "rep_id": int(rid),
+            "seconds": float(r["duration_s"].sum()),
+            "lengths": int(len(r)),
+            "yards": int(round(len(r))) * pool_yd,
+            # A medley interval is one of each stroke, so its mode is a four-way
+            # tie that pandas breaks alphabetically into 'backstroke'. Same trap
+            # as the set label, one level down.
+            "stroke": ("IM" if ("im_continuous" in r.columns
+                                and r["im_continuous"].all())
+                       else (r["predicted"].mode().iloc[0]
+                             if len(r["predicted"].mode()) else "undetermined")),
+            "rest_before_s": float(r["rest_before_s"].iloc[0])
+                             if "rest_before_s" in r.columns else 0.0,
+        } for rid, r in reps]
         out.append({
             "set_id": int(sid),
             "reps": int(n_reps),
@@ -108,6 +123,14 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             "rest_before_s": (float(g["rest_before_s"].iloc[0])
                               if "rest_before_s" in g.columns else 0.0),
             "note": note,
+            # Every interval in the set, so a correction can name one of them.
+            # A set is a convenient default, not a claim that a swimmer held one
+            # stroke for all of it — "the last three of those 50s were breast" is
+            # an ordinary thing to have swum and has to be expressible.
+            "reps_detail": detail,
+            # Compared across INTERVALS, not lengths: one undetermined length in
+            # a 1250 does not make the set mixed, it makes one length unresolved.
+            "mixed": len({d["stroke"] for d in detail}) > 1,
         })
         if ref is not None:
             row = out[-1]

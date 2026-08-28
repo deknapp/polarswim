@@ -28,7 +28,7 @@ polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
 polarswim --db sample/sample.db report --from 2026-08-01
 polarswim --db sample/sample.db serve                # web UI on :8770
 
-.venv/bin/pytest -q                                 # 305 tests, no network
+.venv/bin/pytest -q                                 # 308 tests, no network
 ```
 
 Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
@@ -261,10 +261,14 @@ in the database rather than a pickle makes it inspectable and diffable.
 
 ## Corrections, and the model they train
 
-The **corrections** tab puts a stroke dropdown on every set. Choosing one labels
-every length in that set — a 7×50 gives fourteen labelled lengths from one click,
-which is what makes hand-labelling survivable — and choosing `IM` fills in
-fly · back · breast · free across each round.
+The **corrections** tab puts a stroke dropdown on every **interval**, and one on
+the set that bulk-sets the intervals under it. Interval, not set, is the unit that
+matters: a set is only a run of equal distances, so four 50s freestyle followed by
+three breaststroke is *one set* and two strokes. Labelling per set would make that
+correction unsayable and the wrong answer unfixable. The set control is there for
+when it genuinely was all one thing — a 7×50 then gives fourteen labelled lengths
+from one click, which is what makes hand-labelling survivable. `IM` fills in
+fly · back · breast · free within an interval.
 
 Three layers decide a length's stroke, in strict order of precedence:
 
