@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 251 tests, no network
+pytest -q                                                    # 269 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -282,7 +282,8 @@ clarify.
 
 | Module | Responsibility |
 |---|---|
-| `auth` | Credential from a pasted cURL; decodes the session JWT's `exp` and refuses to start a long backfill on a dead session |
+| `auth` | Resolves a credential — browser session first, pasted cURL as fallback; decodes the JWT's `exp` and refuses to start a long backfill on a dead session |
+| `browser` | Reads the live Flow session from Chrome and renews it through Polar's own SSO redirect chain |
 | `client` | Flow's private API — walks the calendar's **100-day cap**, retries 5xx, rate limits, and catches the HTML login page Flow serves with a 200 when a session lapses |
 | `parse` | Pure transformation: ISO-8601 durations, per-length records, HR arrays |
 | `models` | Schema as SQLAlchemy Core tables |
@@ -350,8 +351,44 @@ frame for `spark.read.jdbc` is the only change.
 
 ## Syncing your own data
 
-Flow has no public API for this, and its session cookie is a ~1 hour JWT with no
-documented refresh — so you supply it once per sync:
+```bash
+python -m polarswim sync --from 2024-01-01
+```
+
+If you are signed in to Flow in Chrome, that is the whole procedure. Sync borrows
+the session the browser already has, and runs the analysis when it finishes.
+
+**Why that takes any work at all.** Flow has no public API here, and it hands its
+web client a `FLOW_SESSION` JWT that expires after exactly one hour with no
+refresh claim — so a credential copied by hand is dead by the next morning. But
+the hourly token is not how the browser stays logged in. Behind it sits a
+`remember-me` cookie on `auth.polar.com` with a **two-week** life, which the
+browser silently trades for a new token on every page load. That is why the site
+never asks you for a password while a copied token dies overnight.
+
+So `auth.py` takes the credential that *mints* tokens rather than a minted one:
+it reads the `*.polar.com` cookies from the local Chrome profile — decrypting
+them with the key Chrome keeps in the macOS Keychain, which prompts for approval
+once — and if the token is spent it replays the same `/flowSso/login` redirect
+chain the browser performs. The login *page* is a JavaScript application, but the
+silent re-authentication behind it is ordinary redirects and cookies, so this
+needs no headless browser and adds no dependency. You re-authenticate about once
+a fortnight, by opening Flow in Chrome, and only if that login has lapsed.
+
+Two details that decide whether this is safe to do. `remember-me` is **not**
+rotated by minting, so the tool cannot log your browser out. `session_id` **is**,
+so whoever minted last holds the live session — the renewed cookies are therefore
+saved to `~/.polarswim/session.json` (mode `600`) rather than re-read from a
+Chrome copy the tool's own last run invalidated, and a stale store falls through
+to Chrome to recover.
+
+Only hosts under `polar.com` are ever decrypted. The Keychain key opens every
+cookie Chrome holds, and a tool that reads swims has no business touching a bank
+session; a test enforces the boundary.
+
+**The manual path still works**, and `auto` falls back to it whenever the browser
+cannot help — an unsupported platform, a declined Keychain prompt, a lapsed
+login. Use `--cookie-source file` to insist on it:
 
 1. Open **flow.polar.com** and log in
 2. DevTools → **Network**, filter `api/training`
@@ -360,11 +397,7 @@ documented refresh — so you supply it once per sync:
 
 Paste the whole cURL command; `auth.py` extracts the cookie. Copy a request from
 `localizations.flow.polar.com` by mistake — a separate, cookie-less host — and you
-get a clear error saying so rather than a confusing 401 later. Then:
-
-```bash
-python -m polarswim sync --from 2024-01-01
-```
+get a clear error saying so rather than a confusing 401 later.
 
 Credentials are never written to the database or the repository.
 

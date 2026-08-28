@@ -11,3 +11,4 @@ cookie.txt
 *.db-shm
 # the shipped sample database is a deliberate exception
 !sample/sample.db
+session.json

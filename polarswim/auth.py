@@ -25,6 +25,12 @@ class AuthError(RuntimeError):
     """No usable credential, or the credential has expired."""
 
 
+# Where the last resolved credential came from, so the CLI can say so. A plain
+# dict rather than a return value: every caller wants the cookie, and only the
+# CLI wants the provenance.
+last_source: dict[str, str] = {"name": "unknown"}
+
+
 def _from_curl(text: str) -> str | None:
     """Extract the cookie string from a copied cURL command, if that's what we got.
 
@@ -38,12 +44,35 @@ def _from_curl(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def load_cookie(path: str | Path | None = None) -> str:
-    """Resolve the cookie string from the environment or a file.
+def load_cookie(path: str | Path | None = None, source: str = "auto") -> str:
+    """Resolve the cookie string, preferring a session the browser already holds.
 
-    Order: `$POLAR_COOKIE`, then the given path, then `~/.polarswim/cookie.txt`.
-    A raw cURL command is accepted as-is so the user can paste without editing.
+    `source` selects where it comes from:
+
+      auto     ask the browser first, fall back to the environment or the file
+      browser  the browser only, so a failure is reported rather than papered over
+      file     the environment or the file only
+
+    `auto` is the default because the browser path is strictly better when it
+    works — Flow's token dies after an hour, and only the browser holds the
+    two-week credential that mints a new one. It is a preference, not a
+    requirement: an unsupported platform, a declined Keychain prompt or a lapsed
+    browser login all fall through to the credential the user pasted, so this can
+    make syncing easier but never harder.
     """
+    if source not in ("auto", "browser", "file"):
+        raise AuthError(f"unknown credential source {source!r}")
+
+    if source in ("auto", "browser"):
+        from . import browser as _browser          # imported here: browser imports us
+        try:
+            cookie = _browser.credential()
+            last_source["name"] = "browser"
+            return cookie
+        except AuthError:
+            if source == "browser":
+                raise
+
     raw = os.environ.get(ENV_VAR)
     if not raw:
         p = Path(path) if path else DEFAULT_COOKIE_PATH
@@ -56,6 +85,7 @@ def load_cookie(path: str | Path | None = None) -> str:
             )
         raw = p.read_text()
 
+    last_source["name"] = "environment" if os.environ.get(ENV_VAR) else "file"
     cookie = _from_curl(raw) or raw
     cookie = " ".join(cookie.split())
     if "FLOW_SESSION=" not in cookie:

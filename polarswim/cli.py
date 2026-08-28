@@ -25,6 +25,7 @@ import sys
 import sqlalchemy as sa
 
 from . import ai, analyze, db, render, report
+from . import auth as _auth
 from .auth import AuthError, assert_valid, load_cookie, session_expiry
 from .client import ClientConfig, FlowClient, FlowError, SessionExpired
 from .models import workouts
@@ -90,12 +91,13 @@ def _header(engine, workout_id: int) -> dict:
 
 # --- commands --------------------------------------------------------------
 def cmd_sync(args) -> int:
-    cookie = load_cookie(args.cookie)
+    cookie = load_cookie(args.cookie, source=args.cookie_source)
     assert_valid(cookie)
     exp = session_expiry(cookie)
     if exp:
         mins = int((exp - dt.datetime.now(dt.timezone.utc).timestamp()) / 60)
-        print(f"session valid for ~{mins} more minutes")
+        print(f"session valid for ~{mins} more minutes "
+              f"(from the {_auth.last_source['name']})")
 
     engine = db.connect(args.db)
     client = FlowClient(cookie, ClientConfig(min_interval_s=args.interval))
@@ -275,6 +277,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=None)
     s.add_argument("--force", action="store_true")
     s.add_argument("--cookie", default=None)
+    s.add_argument("--cookie-source", choices=("auto", "browser", "file"),
+                   default="auto",
+                   help="where the session comes from; 'auto' asks the browser "
+                        "first and falls back to the pasted cookie file")
     s.add_argument("--interval", type=float, default=0.4)
     s.add_argument("--no-analyze", action="store_true",
                    help="fetch only; leave the new lengths unclassified")
