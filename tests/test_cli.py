@@ -199,3 +199,35 @@ class TestSyncRunsTheAnalysis:
 
     def test_analysis_is_on_by_default(self):
         assert cli.build_parser().parse_args(["sync"]).no_analyze is False
+
+
+class TestSetupDocs:
+    """A newcomer follows these literally, so they have to be literally right."""
+
+    def test_the_referenced_launcher_exists_and_is_executable(self):
+        import os
+        launcher = ROOT / "bin" / "polarswim"
+        assert launcher.is_file()
+        assert os.access(launcher, os.X_OK)
+
+    def test_every_path_the_readme_points_at_is_present(self):
+        readme = (ROOT / "README.md").read_text()
+        for path in ("sample/sample.db", "requirements.txt",
+                     "requirements-spark.txt", "bin/polarswim",
+                     "docs/workout-card.png"):
+            if path in readme:
+                assert (ROOT / path).exists(), f"README references missing {path}"
+
+    def test_the_stated_minimum_python_is_not_above_what_we_run_on(self):
+        import re
+        import sys
+        m = re.search(r"Requires Python (\d+)\.(\d+)", (ROOT / "README.md").read_text())
+        assert m, "README no longer states a minimum Python version"
+        assert (int(m.group(1)), int(m.group(2))) <= sys.version_info[:2]
+
+    def test_the_symlink_step_creates_its_directory_first(self):
+        """`ln -s` into ~/.local/bin fails outright when that directory does not
+        exist, which it need not on a fresh machine."""
+        readme = (ROOT / "README.md").read_text()
+        link = readme.index("ln -s")
+        assert "mkdir -p ~/.local/bin" in readme[:link]

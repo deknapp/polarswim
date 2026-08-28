@@ -127,6 +127,13 @@ def cmd_status(args, engine=None) -> int:
     engine = engine or db.connect(args.db)
     s = db.summary(engine)
     print(f"database: {db.make_url(args.db)}")
+    if not s["workouts"]:
+        # Connecting creates a SQLite file on demand, which is right for a first
+        # sync and a trap everywhere else: `--db sample/sample.db` run from the
+        # wrong directory silently makes an empty database and reports zeroes,
+        # rather than saying the file it was pointed at was not there.
+        print("  (this database is empty — a new file was created if the path "
+              "was wrong; check --db, or run `polarswim sync`)")
     for k in ("workouts", "pool_swims", "lengths", "hr_samples", "predictions"):
         print(f"  {k:<12} {s[k]:,}")
     print(f"  range        {s['earliest'][:10]} .. {s['latest'][:10]}")

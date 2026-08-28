@@ -63,22 +63,31 @@ def load_cookie(path: str | Path | None = None, source: str = "auto") -> str:
     if source not in ("auto", "browser", "file"):
         raise AuthError(f"unknown credential source {source!r}")
 
+    browser_problem = None
     if source in ("auto", "browser"):
         from . import browser as _browser          # imported here: browser imports us
         try:
             cookie = _browser.credential()
             last_source["name"] = "browser"
             return cookie
-        except AuthError:
+        except AuthError as e:
             if source == "browser":
                 raise
+            # Remembered so the fallback's error can say the browser was tried
+            # and why it did not work. Reporting only "no cookie file" to someone
+            # who is signed in to Flow in Chrome sends them to fix the wrong
+            # thing entirely.
+            browser_problem = str(e).splitlines()[0]
 
     raw = os.environ.get(ENV_VAR)
     if not raw:
         p = Path(path) if path else DEFAULT_COOKIE_PATH
         if not p.exists():
+            tried = (f"\nThe browser was tried first: {browser_problem}"
+                     if browser_problem else "")
             raise AuthError(
-                f"No credential found. Set ${ENV_VAR}, or save your Flow cookie to {p}.\n"
+                f"No credential found. Set ${ENV_VAR}, or save your Flow cookie to {p}."
+                f"{tried}\n"
                 "To get it: open flow.polar.com, DevTools -> Network, filter 'api/training', "
                 "right-click a request -> Copy as cURL, then `pbpaste > "
                 f"{p}`."

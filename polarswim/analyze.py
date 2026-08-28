@@ -472,6 +472,11 @@ IM_MIN_SPREAD = 0.12       # and by at least 12%, so a flat freestyle set is out
 # coincidental matches at no cost.
 IM_DISTANCES_YD = (100, 200, 400)
 
+# A rep is collapsed to one stroke only when one label holds more than this share
+# of it. Strictly more than half: at exactly half there are two equal claims and
+# no reason to prefer either.
+MAJORITY = 0.5
+
 
 @dataclass
 class IMRound:
@@ -600,6 +605,7 @@ def enforce_rep_consistency(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     predicted = df["predicted"].to_numpy(dtype=object)
     confidence = df["confidence"].to_numpy(dtype=float)
+    medleys: list[np.ndarray] = []
 
     for _, g in df.groupby(["workout_id", "rep_id"], sort=False):
         if "im_continuous" in g.columns and g["im_continuous"].any():
@@ -610,6 +616,16 @@ def enforce_rep_consistency(df: pd.DataFrame) -> pd.DataFrame:
         # which is the only further evidence available.
         counts = g.groupby("predicted")["confidence"].agg(["size", "mean"])
         winner = counts.sort_values(["size", "mean"], ascending=False).index[0]
+
+        # One exemption, and it is narrow. A lone 100 IM is four lengths, one of
+        # each stroke — no label above 25%. Structural detection needs two rounds
+        # to claim a medley, so a medley swum once arrives here unmarked, and
+        # collapsing it on a 25% plurality erased a real four-stroke swim to
+        # invent a fake one-stroke one. A rep holding all four strokes in exactly
+        # equal measure is a medley, not a rep with strays in it.
+        if _looks_like_a_medley(g):
+            medleys.append(g.index.to_numpy())
+            continue
         rows = g.index.to_numpy()
         positions = df.index.get_indexer(rows)
         predicted[positions] = winner
@@ -619,7 +635,32 @@ def enforce_rep_consistency(df: pd.DataFrame) -> pd.DataFrame:
 
     df["predicted"] = predicted
     df["confidence"] = confidence.round(3)
+
+    # Marked as a medley so every later view agrees: the set table names it IM
+    # rather than one of its legs, the personal bests rank it against medleys
+    # instead of freestyle, and the stroke mix and the table still reconcile —
+    # a medley is four strokes in equal measure by definition, which is exactly
+    # what these lengths are.
+    if medleys:
+        if "im_continuous" not in df.columns:
+            df["im_continuous"] = False
+        df.loc[np.concatenate(medleys), "im_continuous"] = True
     return df
+
+
+def _looks_like_a_medley(g: pd.DataFrame) -> bool:
+    """All four strokes, in equal measure, across one unbroken swim.
+
+    Deliberately strict. Anything looser would exempt ordinary noisy reps from
+    the rule this function exists to make room for, and the cost of a false
+    positive here is a rep permanently mislabelled as a medley.
+    """
+    n = len(g)
+    if n % 4 or n < 4:
+        return False
+    counts = g["predicted"].value_counts()
+    return (len(counts) == 4 and set(counts.index) == set(IM_ORDER)
+            and (counts == n // 4).all())
 
 
 def label_im(df: pd.DataFrame, rounds: list[IMRound]) -> pd.DataFrame:

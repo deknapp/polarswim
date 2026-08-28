@@ -459,3 +459,28 @@ class TestOneStrokePerUnbrokenSwim:
         out = analyze.enforce_rep_consistency(pd.concat([a, b], ignore_index=True))
         assert set(out[out["rep_id"] == 1]["predicted"]) == {"freestyle"}
         assert set(out[out["rep_id"] == 2]["predicted"]) == {"breaststroke"}
+
+    def test_a_lone_medley_is_exempt(self):
+        """A lone 100 IM is four lengths, one of each stroke — no label above
+        25%. Structural detection needs two rounds, so a medley swum once arrives
+        here unmarked, and collapsing it on a plurality erased a real four-stroke
+        swim to invent a fake one-stroke one."""
+        df = self._rep(list(analyze.IM_ORDER))
+        out = analyze.enforce_rep_consistency(df)
+        assert out["predicted"].tolist() == list(analyze.IM_ORDER)
+        # And marked, so the set table names it IM and the bests rank it as one.
+        assert out["im_continuous"].all()
+
+    def test_an_even_split_of_two_strokes_is_not_a_medley(self):
+        """The exemption is for all four strokes in equal measure. Two strokes
+        half and half is an ordinary noisy rep, and still collapses."""
+        df = self._rep(["freestyle", "freestyle", "butterfly", "butterfly"])
+        assert analyze.enforce_rep_consistency(df)["predicted"].nunique() == 1
+
+    def test_three_strokes_do_not_make_a_medley(self):
+        df = self._rep(["freestyle", "butterfly", "backstroke", "freestyle"])
+        assert analyze.enforce_rep_consistency(df)["predicted"].nunique() == 1
+
+    def test_a_clear_majority_still_absorbs_its_strays(self):
+        df = self._rep(["freestyle"] * 19 + ["butterfly"] * 3)
+        assert set(analyze.enforce_rep_consistency(df)["predicted"]) == {"freestyle"}

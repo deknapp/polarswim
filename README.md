@@ -12,27 +12,47 @@ zero.
 This recovers the per-length data from the same private endpoint the web app uses,
 loads it into a queryable database, and infers the stroke Polar couldn't.
 
+**Requires Python 3.9 or newer.** Everything else is pip-installable; there is no
+JVM, no build step, and no CDN.
+
 ```bash
+git clone https://github.com/deknapp/polarswim.git
+cd polarswim
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# Put `polarswim` on your PATH. macOS ships only `python3`, without these
-# dependencies, so `python -m polarswim` finds either no interpreter or no
-# pandas; the launcher resolves the project's own virtualenv from anywhere.
-ln -s "$PWD/bin/polarswim" ~/.local/bin/polarswim
+# Everything below runs against the committed sample database — no Polar account
+# needed. Run them from the project directory: `sample/sample.db` is a relative
+# path, and pointing --db at a file that isn't there creates an empty one.
+.venv/bin/python -m polarswim --db sample/sample.db status
+.venv/bin/python -m polarswim --db sample/sample.db analyze
+.venv/bin/python -m polarswim --db sample/sample.db card 2026-08-19
+.venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
+.venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-# Everything below runs against the committed sample database — no account needed.
-polarswim --db sample/sample.db status
-polarswim --db sample/sample.db analyze
-polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
-polarswim --db sample/sample.db report --from 2026-08-01
-polarswim --db sample/sample.db serve                # web UI on :8770
-
-.venv/bin/pytest -q                                 # 319 tests, no network
+.venv/bin/pytest -q                                # 327 tests, no network
 ```
 
-Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
-run from the project directory.
+### Optional: `polarswim` on your PATH
+
+`python -m polarswim` will not work outside the project directory — macOS ships
+only `python3`, and without the virtualenv it has none of these dependencies. The
+launcher in `bin/` resolves the project's own interpreter from anywhere:
+
+```bash
+mkdir -p ~/.local/bin                              # may not exist yet
+ln -s "$PWD/bin/polarswim" ~/.local/bin/polarswim
+```
+
+Then `polarswim status`, `polarswim serve`, and so on. If the command still isn't
+found, `~/.local/bin` is not on your `PATH`:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+```
+
+The commands above use `.venv/bin/python -m polarswim`; with the symlink
+installed, each is just `polarswim`.
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
 This is my own training data, already published publicly on Strava, so there is no
@@ -44,35 +64,48 @@ privacy concern in shipping it; no credentials, tokens, or API responses are inc
 a Strava description:
 
 ```
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃🏊 2026-08-19  1,525 yd  47:03   ┃
-┃   61 lengths  ·  avg 126 bpm   ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│  6×25 brst ▇▇▇       29s       │
-│  4×25 free ▇▇▇▇      28s       │
-│  3×25 free ▇▇▇       30s       │
-│  3×25 drll ▇         36s       │
-│ 12×25 back ▇▇▇       32s       │
-│  1×25 free ▇▇▇▇▇     24s       │
-│  2×25 fly  ▇▇▇▇▇▇    20s       │
-│ 12×25 fly  ▇▇▇▇      28s       │
-│  2×25 back ▇▇▇       31s       │
-│  4×25 back ▇▇▇       30s       │
-│  2×25 back ▇▇        32s       │
-│  2×25 brst ▇▇▇▇▇     24s       │
-│  4×25 free ▇▇▇▇      28s       │
-│  3×25 free ▇▇▇▇      29s       │
-│  1×25 free ▇▇▇▇▇▇    21s       │
-└────────────────────────────────┘
+🏊 2026-08-19   1,525 yd   47:03
+   61 lengths · avg 126 bpm · load 50/int 67
 
-pace by length (taller = faster)
-  1 ▅▅▅▅▅▄▅▆▅▃▁█▅▂▁▇▆▄▁▄▃█▃▆▃▄▃█▇▆
- 31 █▃▃▂▄▄▆▅▇▄▇▅▅▃▄▃▄▄▄▃▄▄▇▄▄▁▇▄▂█
+set · time · zone · speed · pace/50
+🟦 3×50 free · 58s · ⚪Z1 · 11% · 58s
+🟦 1×75 free · 1:23 · ⚪Z1 · — · 55s
+⬜ 1×25 drll · 34s · ⚪Z1 · 16% · 67s
+🟦 1×50 free · 59s · ⚪Z1 · 9% · 59s
+⬛ 1×25 ? · 30s · ⚪Z1 · 36% · 59s
+⬜ 1×75 drll · 1:39 · ⚪Z1 · — · 66s ★
+🟪 1×100 fly · 2:10 · 🔵Z2 · — · 65s ★
+🟦 1×50 free · 54s · 🔵Z2 · 32% · 54s
+🟩 2×50 back · 1:02 · 🔵Z2 · 15% · 62s ★
+🟦 1×50 free · 54s · 🔵Z2 · 29% · 54s
+🟦 1×25 free · 24s · ⚪Z1 · 69% · 48s
+🟦 1×50 free · 41s · 🟢Z3 · 91% · 41s
+🟩 1×50 back · 1:04 · 🟢Z3 · 7% · 64s
+🟪 1×50 fly · 1:03 · 🔵Z2 · 11% · 63s
+🟦 3×50 free · 48s · 🟢Z3 · 68% · 48s
+🟪 1×50 fly · 52s · 🟢Z3 · 49% · 52s ★
+🟩 4×50 back · 1:02 · 🟢Z3 · 15% · 62s ★
+🟦 2×50 free · 52s · ⚪Z1 · 38% · 52s
+⬜ 1×25 drll · 39s · ⚪Z1 · 3% · 78s
+🟦 2×25 free · 24s · ⚪Z1 · 69% · 48s
+🟦 1×50 free · 53s · ⚪Z1 · 34% · 53s
+🟦 1×25 free · 21s · ⚪Z1 · 88% · 42s
+
+🟦 free    825 yd    54%
+🟩 back    350 yd    23%
+🟪 fly     200 yd    13%
+⬜ drll    125 yd     8%
+⬛ ?        25 yd     2%
+
+⚪Z1 57%  🔵Z2 15%  🟢Z3 26%  🟠Z4 2%
+speed = your own percentile at that distance
+★ = personal best
+
+— polarswim
 ```
 
 The card is coloured. Strava descriptions are plain text — no markdown, no HTML, no
-ANSI colour — but emoji render in colour everywhere, so the stroke mix is a
-proportional stacked bar of coloured squares and every set row is tagged with its
+ANSI colour — but emoji render in colour everywhere, so every set row is tagged with its
 stroke's colour. The web dashboard draws the same breakdown as a real SVG pie using
 matching colours.
 
@@ -145,9 +178,16 @@ because when both were squares a blue square meant freestyle in one column and Z
 in the next.
 
 **The image** — the *download image for Strava* button in the dashboard — is the
-full analysis as a PNG you can attach to the activity as a photo: stroke-mix donut,
-per-set table with heart-rate zones, relative speed, pace per 50 and personal
-bests, a labelled header for every column, and a key explaining each one. It is built server-side as SVG and rasterised in the browser through a canvas,
+full analysis as a PNG you can attach to the activity as a photo:
+
+![The analysis exported as a PNG: a stroke-mix donut, and a table of sets with
+effort zone, speed percentile, pace per 50 and rest](docs/workout-card.png)
+
+Stroke-mix donut, per-set table with heart-rate zones, relative speed, pace per 50
+and personal bests, a labelled header for every column, and a key explaining each
+one. The `3×100 IM` row is a medley identified by its structure; the `4×50 free`
+and `3×50 breast` are one set that Polar recorded as seven 50s, split where the
+stroke changes. It is built server-side as SVG and rasterised in the browser through a canvas,
 so it needs no plotting library and no external script. The SVG deliberately avoids
 `foreignObject` and any external reference, both of which taint a canvas and would
 make the export fail silently; a test enforces that.
