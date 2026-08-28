@@ -640,6 +640,18 @@ def analyze(engine: Engine, workout_id: int | None = None,
     im = detect_im(df)
     df = label_im(df, im)
 
+    # Corrections train the model and then override it. Fitting happens here,
+    # over the whole history in one pass, and the result is written to
+    # `model_params` so every later view loads it instead of refitting.
+    from . import learn
+    labels = db.load_labels(engine)
+    if labels:
+        fitted = learn.fit(full if workout_id is None else df, labels)
+        if fitted.is_usable():
+            params.update(fitted.as_params())
+            df = learn.apply(df, fitted)
+    df = learn.apply_labels(df, labels)
+
     kinds = {(r.workout_id, r.idx): r.kind for r in repairs}
     rows = [dict(workout_id=int(r.workout_id), idx=int(r.idx),
                  predicted=r.predicted, confidence=float(r.confidence),

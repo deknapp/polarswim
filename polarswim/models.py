@@ -104,6 +104,23 @@ model_params = Table(
     Column("updated_at", String(32), nullable=False),
 )
 
+# Ground truth supplied by the swimmer, kept apart from BOTH observation and
+# inference. A correction is not a prediction and must never be overwritten by
+# re-running the classifier, reparsing, or re-syncing the workout it belongs to —
+# it is the only thing in this database that no algorithm produced.
+labels = Table(
+    "labels", metadata,
+    Column("workout_id", Integer, primary_key=True),
+    Column("idx", Integer, primary_key=True, autoincrement=False),
+    Column("stroke", String(24), nullable=False),
+    Column("source", String(16), nullable=False, default="human"),
+    Column("set_id", Integer),               # which set the correction was made on
+    Column("labelled_at", String(32), nullable=False),
+    ForeignKeyConstraint(["workout_id", "idx"], ["lengths.workout_id", "lengths.idx"],
+                         ondelete="CASCADE"),
+    Index("idx_labels_stroke", "stroke"),
+)
+
 # Inference output, deliberately separate from observed data so the classifier can
 # be re-run and compared without touching anything Polar reported.
 predictions = Table(
@@ -127,4 +144,4 @@ predictions = Table(
 )
 
 ALL_TABLES = (workouts, lengths, hr_samples, raw_payloads,
-              sync_runs, model_params, predictions)
+              sync_runs, model_params, predictions, labels)

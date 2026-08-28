@@ -296,3 +296,65 @@ class TestPersonalBestsPage:
         for p in prs:
             if p["stroke"] != "IM":
                 assert p["form"] is None and p["splits_s"] is None
+
+
+class TestCorrectionsTab:
+    """A correction is ground truth: it sticks, and nothing overwrites it."""
+
+    @pytest.fixture
+    def client(self):
+        return create_app(SAMPLE).test_client()
+
+    @pytest.fixture
+    def a_set(self, client, workout_id):
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        return d["sets"][0]
+
+    def test_correcting_a_set_labels_every_length_in_it(self, client, workout_id, a_set):
+        r = client.post(f"/api/labels/{workout_id}",
+                        json={"sets": {str(a_set["set_id"]): "butterfly"}})
+        assert r.get_json()["saved"] == a_set["n"]
+
+    def test_a_correction_shows_up_in_the_workout_view(self, client, workout_id, a_set):
+        client.post(f"/api/labels/{workout_id}",
+                    json={"sets": {str(a_set["set_id"]): "butterfly"}})
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        row = next(s for s in d["sets"] if s["set_id"] == a_set["set_id"])
+        assert row["stroke"] == "butterfly"
+
+    def test_a_correction_survives_reanalysis(self, client, workout_id, a_set):
+        from polarswim import analyze, db as _db
+        client.post(f"/api/labels/{workout_id}",
+                    json={"sets": {str(a_set["set_id"]): "butterfly"}})
+        engine = _db.connect(SAMPLE)
+        analyze.analyze(engine)
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        row = next(s for s in d["sets"] if s["set_id"] == a_set["set_id"])
+        assert row["stroke"] == "butterfly"
+
+    def test_a_correction_can_be_withdrawn(self, client, workout_id, a_set):
+        sid = str(a_set["set_id"])
+        client.post(f"/api/labels/{workout_id}", json={"sets": {sid: "butterfly"}})
+        client.post(f"/api/labels/{workout_id}", json={"sets": {sid: ""}})
+        assert str(a_set["set_id"]) not in client.get(
+            f"/api/labels/{workout_id}").get_json()["sets"]
+
+    def test_correcting_a_set_to_IM_fills_in_the_stroke_order(self, client, workout_id):
+        d = client.get(f"/api/workout/{workout_id}").get_json()
+        four = next((s for s in d["sets"] if s["n"] % 4 == 0), None)
+        if four is None:
+            pytest.skip("no set with a length count divisible by four")
+        client.post(f"/api/labels/{workout_id}",
+                    json={"sets": {str(four["set_id"]): "IM"}})
+        assert client.get(f"/api/labels/{workout_id}").get_json()[
+            "sets"][str(four["set_id"])] == "IM"
+
+    def test_the_page_offers_the_corrections_tab(self, client):
+        page = client.get("/").data.decode()
+        assert "corrections" in page and "FIX_STROKES" in page
+
+    def test_accuracy_is_unreported_until_there_are_corrections(self, client, workout_id):
+        from polarswim import db as _db
+        _db.clear_labels(_db.connect(SAMPLE), workout_id)
+        acc = client.get(f"/api/labels/{workout_id}").get_json()["accuracy"]
+        assert acc["accuracy"] is None

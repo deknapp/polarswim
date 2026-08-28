@@ -14,7 +14,7 @@ import datetime as dt
 
 from flask import Flask, Response, jsonify, request
 
-from . import ai, analyze, db, image, metrics, render, report
+from . import ai, analyze, db, image, learn, metrics, render, report
 
 # Web equivalents of the card's emoji palette, so the dashboard and the pasted
 # card describe a stroke with the same colour.
@@ -78,8 +78,9 @@ PAGE = """<!doctype html>
  h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;
     margin:0 0 12px}
  .bar{height:9px;background:var(--accent);border-radius:2px;display:inline-block}
- input[type=date]{background:var(--panel);color:var(--fg);border:1px solid var(--line);
-        border-radius:5px;padding:5px}
+ input[type=date],select{background:var(--panel);color:var(--fg);
+        border:1px solid var(--line);border-radius:5px;padding:5px}
+ select{min-width:170px}
 </style></head><body>
 <header><h1>polarswim</h1><span class="dim" id="sub">loading…</span>
   <span style="flex:1"></span>
@@ -87,6 +88,7 @@ PAGE = """<!doctype html>
     <button class="tab on" data-tab="workouts" onclick="tab('workouts')">workouts</button>
     <button class="tab" data-tab="summary" onclick="tab('summary')">summary</button>
     <button class="tab" data-tab="prs" onclick="tab('prs')">personal bests</button>
+    <button class="tab" data-tab="fix" onclick="tab('fix')">corrections</button>
   </nav>
 </header>
 <div class="wrap"><aside id="list"></aside><main id="main"></main></div>
@@ -105,6 +107,9 @@ async function boot(){
 }
 async function pick(i){
   cur=swims[i];
+  if(document.querySelector('.tab.on')?.dataset.tab==='fix'){
+    fixWorkout=cur.id; loadFix(); return;
+  }
   document.querySelectorAll('.sw').forEach(e=>e.classList.remove('on'));
   $('#sw'+i).classList.add('on');
   $('#main').innerHTML='<div class="card dim">loading…</div>';
@@ -229,6 +234,7 @@ function tab(name){
   document.querySelector('aside').style.display = name==='workouts'?'':'none';
   if(name==='workouts'){ cur?pick(swims.indexOf(cur)):pick(0); }
   else if(name==='summary') loadSummary();
+  else if(name==='fix') loadFix();
   else loadPRs();
 }
 async function loadSummary(){
@@ -337,6 +343,91 @@ function renderPRs(){
      </div>
    </div>`;
 }
+const FIX_STROKES=['freestyle','backstroke','breaststroke','butterfly','IM',
+                   'other','undetermined'];
+let fixWorkout=null;
+
+async function loadFix(){
+  $('#main').innerHTML='<div class="card dim">loading…</div>';
+  document.querySelector('aside').style.display='';
+  fixWorkout = fixWorkout || (swims.length?swims[0].id:null);
+  if(!fixWorkout){ $('#main').innerHTML='<div class="card dim">no swims</div>'; return; }
+  const [d,l] = await Promise.all([
+    (await fetch('/api/workout/'+fixWorkout)).json(),
+    (await fetch('/api/labels/'+fixWorkout)).json()]);
+  renderFix(d,l);
+}
+
+function renderFix(d,l){
+  const acc=l.accuracy||{};
+  const counts=Object.entries(l.counts||{}).sort((a,b)=>b[1]-a[1]);
+  $('#main').innerHTML=`
+   <div class="card">
+     <h2>corrections — ${d.header.date}</h2>
+     <div class="dim" style="font-size:12px;margin-bottom:12px">
+       Set the stroke for any set the classifier got wrong. One choice labels every
+       length in that set; <b>IM</b> fills in fly · back · breast · free across each
+       round. Your corrections outrank the classifier everywhere and survive
+       re-analysis, so a set you fix stays fixed.
+     </div>
+     <table><tr><th>set</th><th>reps</th><th>inferred</th><th>conf</th>
+       <th>time</th><th>pace/50</th><th>your correction</th></tr>
+     ${d.sets.map(s=>`<tr>
+       <td>${s.set_id}</td><td><b>${s.reps}×${s.rep_yards}</b></td>
+       <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
+       <td class="dim">${s.confidence.toFixed(2)}</td>
+       <td>${fmtTime(s.rep_seconds)}</td>
+       <td class="dim">${s.pace_50_s.toFixed(0)}s</td>
+       <td><select id="fx${s.set_id}" onchange="markDirty()">
+         <option value="">— leave as inferred —</option>
+         ${FIX_STROKES.map(x=>`<option value="${x}"
+            ${l.sets[s.set_id]===x?'selected':''}>${x}</option>`).join('')}
+       </select></td></tr>`).join('')}
+     </table>
+     <div style="margin-top:14px">
+       <button onclick="saveFix()">save corrections</button>
+       <span id="fixnote" class="dim"></span>
+     </div>
+   </div>
+   <div class="card">
+     <h2>what the model has learned</h2>
+     ${counts.length?`<div style="margin-bottom:10px">${counts.map(([k,v])=>
+        `<span class="chip" style="background:var(--line);color:var(--fg);
+         margin-right:8px">${k} ${v}</span>`).join('')}</div>`
+      :'<div class="dim">No corrections yet. The classifier is running on rules alone.</div>'}
+     ${acc.accuracy!=null?`
+       <div class="stat"><b>${acc.accuracy}%</b><span>held-out accuracy</span></div>
+       <div class="stat"><b>${acc.n}</b><span>labelled lengths</span></div>
+       <div class="dim" style="font-size:12px;margin-top:8px">
+         Measured by holding out whole sets, not lengths — lengths within a set are
+         near-duplicates and splitting on them would leak the answer and flatter the
+         score. It reads pessimistically, because the sets you chose to correct are
+         the ones the classifier got wrong.</div>
+       ${acc.confusion&&acc.confusion.length?`<table style="margin-top:12px">
+         <tr><th>you said</th><th>model said</th><th>times</th></tr>
+         ${acc.confusion.map(c=>`<tr><td>${c.actual}</td>
+           <td class="${c.actual!==c.predicted?'lo':''}">${c.predicted}</td>
+           <td class="dim">${c.n}</td></tr>`).join('')}</table>`:''}`
+      :`<div class="dim" style="font-size:12px">
+         ${acc.reason||''} Accuracy can only be reported once there are corrections
+         to hold out — without ground truth it is not measurable at all, which is
+         the honest position this tool started from.</div>`}
+   </div>`;
+}
+function markDirty(){ $('#fixnote').textContent='unsaved changes'; }
+async function saveFix(){
+  const sets={};
+  document.querySelectorAll('[id^=fx]').forEach(el=>{
+    sets[el.id.slice(2)] = el.value;
+  });
+  $('#fixnote').textContent='saving and re-analysing…';
+  const r=await (await fetch('/api/labels/'+fixWorkout,
+    {method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({sets})})).json();
+  $('#fixnote').textContent=`saved ${r.saved} lengths — model refitted`;
+  loadFix();
+}
+
 async function loadReport(){
   const q=new URLSearchParams();
   if($('#from').value)q.set('from',$('#from').value);
@@ -437,6 +528,70 @@ def create_app(db_url=None) -> Flask:
             return jsonify(text=out.text, model=out.model)
         except ai.AIError as e:
             return jsonify(text=f"AI review unavailable: {e}", model="error")
+
+    @app.post("/api/labels/<int:wid>")
+    def save_labels(wid: int):
+        """Record corrections for one workout, set by set.
+
+        A set is the unit because it is the unit a swimmer remembers: one answer
+        labels every length in it. `IM` expands across each round in stroke order,
+        which is the only place in this app where order is a fact rather than an
+        inference.
+        """
+        from . import learn
+        payload = request.get_json(silent=True) or {}
+        df = report.classified_lengths(engine, wid)
+        if df.empty:
+            return jsonify(error="not found"), 404
+
+        rows = []
+        for set_id, stroke in (payload.get("sets") or {}).items():
+            g = df[df["set_id"] == int(set_id)].sort_values("idx")
+            if g.empty:
+                continue
+            if not stroke:
+                db.clear_labels(engine, wid, int(set_id))
+                continue
+            if stroke == "IM":
+                for _, rep in g.groupby("rep_id"):
+                    idxs = rep["idx"].tolist()
+                    per_leg = max(1, len(idxs) // 4)
+                    for pos, leg in enumerate(analyze.IM_ORDER):
+                        for idx in idxs[pos * per_leg:(pos + 1) * per_leg]:
+                            rows.append(dict(workout_id=wid, idx=int(idx),
+                                             stroke=leg, set_id=int(set_id)))
+            else:
+                rows += [dict(workout_id=wid, idx=int(i), stroke=stroke,
+                              set_id=int(set_id)) for i in g["idx"]]
+
+        saved = db.save_labels(engine, rows)
+        # Refit immediately: a correction that only takes effect on some later
+        # command has not "stuck" in any sense the person making it would accept.
+        analyze.analyze(engine)
+        _ref_cache.clear()
+        return jsonify(saved=saved, counts=db.label_counts(engine))
+
+    @app.get("/api/labels/<int:wid>")
+    def workout_labels(wid: int):
+        labels = db.load_labels(engine, wid)
+        df = report.classified_lengths(engine, wid)
+        by_set = {}
+        if not df.empty:
+            for sid, g in df.groupby("set_id"):
+                marked = {labels.get((wid, int(i))) for i in g["idx"]}
+                marked.discard(None)
+                if marked:
+                    by_set[int(sid)] = ("IM" if len(marked) >= 3
+                                        else sorted(marked)[0])
+        return jsonify(sets=by_set, counts=db.label_counts(engine),
+                       accuracy=_accuracy())
+
+    def _accuracy():
+        from . import learn
+        labels = db.load_labels(engine)
+        if not labels:
+            return {"n": 0, "accuracy": None, "reason": "no corrections yet"}
+        return learn.cross_validate(report.classified_lengths(engine), labels)
 
     @app.get("/api/summary")
     def summary_tab():

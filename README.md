@@ -28,7 +28,7 @@ polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
 polarswim --db sample/sample.db report --from 2026-08-01
 polarswim --db sample/sample.db serve                # web UI on :8770
 
-.venv/bin/pytest -q                                 # 281 tests, no network
+.venv/bin/pytest -q                                 # 305 tests, no network
 ```
 
 Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
@@ -257,8 +257,44 @@ being assigned a coin-flip label.
 
 **It learns.** Reference paces are estimated from the swimmer's own history and
 written to `model_params`, so they tighten as workouts are synced. Keeping the model
-in the database rather than a pickle makes it inspectable and diffable, and it is
-where ground-truth labels would pin the clusters if any were ever supplied.
+in the database rather than a pickle makes it inspectable and diffable.
+
+## Corrections, and the model they train
+
+The **corrections** tab puts a stroke dropdown on every set. Choosing one labels
+every length in that set — a 7×50 gives fourteen labelled lengths from one click,
+which is what makes hand-labelling survivable — and choosing `IM` fills in
+fly · back · breast · free across each round.
+
+Three layers decide a length's stroke, in strict order of precedence:
+
+| | what it is | when it speaks |
+|---|---|---|
+| rules | transparent thresholds over pace, cost and rest | always; the floor |
+| model | Gaussian naive Bayes fitted to your corrections | 20+ labels, and only where confident |
+| **correction** | what you said | **always wins** |
+
+A correction is ground truth. It lives in its own `labels` table, outranks both
+the rules and the model that trained on it, and survives re-analysis, `reparse`
+and re-syncing the workout — the one thing in this database no algorithm produced.
+
+**Why naive Bayes, in numpy, rather than scikit-learn.** Six features and six
+classes fitted from tens of labels needs a low-variance model; gradient boosting
+would fit the corrections better and generalise worse. Writing it out keeps the
+project pip-only, but the real reason is that the fitted parameters are per-class
+means and variances, which go into `model_params` as numbers you can read in SQL.
+A pickled estimator would make the model the one part of this database you could
+not interrogate. It also declines to run below 20 labels, and ignores any class
+with fewer than 8 — a confident answer from four examples is worse than an honest
+`undetermined`.
+
+**Accuracy becomes measurable.** Without ground truth it is not measurable at all,
+which is where this project started. With corrections it is: held-out accuracy and
+a confusion matrix showing which strokes get confused for which. Folds hold out
+whole **sets**, never lengths — lengths inside a set are near-duplicates, and
+splitting on them leaks the answer across the fold boundary and flatters the score.
+The number still reads pessimistically, because the sets you chose to correct are
+the ones the classifier got wrong, and that is the honest direction to be wrong in.
 
 ## Medley: the one place stroke order is known
 
@@ -318,6 +354,7 @@ clarify.
 | `db` | Idempotent upserts, transactional loads, additive schema migration |
 | `sync` | Discover, skip stored, fetch, parse, load |
 | `analyze` | Sets, turn-defect repair, features, classification, medley detection, learned parameters |
+| `learn` | Fits a stroke model to the swimmer's corrections, and reports held-out accuracy |
 | `render` | Unicode cards |
 | `report` | pandas aggregation over a date range |
 | `ai` | Optional Claude review of one session |
@@ -331,7 +368,8 @@ clarify.
 workouts ──┬── lengths       (workout_id, idx)   one row per pool length
            ├── hr_samples    (workout_id, t_s)   flattened from values[] + interval
            ├── raw_payloads  (workout_id)        untouched API response
-           └── predictions   (workout_id, idx)   inference, kept apart from observation
+           ├── predictions   (workout_id, idx)   inference, kept apart from observation
+           └── labels        (workout_id, idx)   corrections; outrank both
 sync_runs                                        audit trail per run
 model_params                                     learned parameters, refined over time
 ```

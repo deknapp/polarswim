@@ -52,7 +52,17 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
         from . import db
         params = db.load_model_params(engine) or analyze.learn_params(df)
     df = analyze.classify(df, params)
-    return analyze.label_im(df, analyze.detect_im(df))
+    df = analyze.label_im(df, analyze.detect_im(df))
+
+    # Order matters and is the whole contract. The fitted model may improve on the
+    # rules; the swimmer's corrections outrank everything, including the model
+    # that was trained on them. The model is loaded, not fitted — fitting happens
+    # once, in `analyze`, over every labelled length there is.
+    from . import db, learn
+    model = learn.from_params(params)
+    if model.is_usable():
+        df = learn.apply(df, model)
+    return learn.apply_labels(df, db.load_labels(engine, workout_id))
 
 
 def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = None,

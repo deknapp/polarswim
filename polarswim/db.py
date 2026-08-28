@@ -20,8 +20,8 @@ import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from .models import (ALL_TABLES, hr_samples, lengths, metadata, model_params,
-                     predictions, raw_payloads, sync_runs, workouts)
+from .models import (ALL_TABLES, hr_samples, labels, lengths, metadata,
+                     model_params, predictions, raw_payloads, sync_runs, workouts)
 from .parse import Workout
 
 DEFAULT_DB_PATH = Path.home() / ".polarswim" / "polarswim.db"
@@ -246,6 +246,51 @@ def save_predictions(engine: Engine, rows: list[dict]) -> int:
         c.execute(sa.insert(predictions),
                   [{**r, "predicted_at": stamp} for r in rows])
     return len(rows)
+
+
+# --- corrections ------------------------------------------------------------
+def save_labels(engine: Engine, rows: list[dict]) -> int:
+    """Record the swimmer's corrections, replacing any earlier one per length.
+
+    Replace rather than accumulate: a person correcting the same set twice means
+    the second answer, not two conflicting opinions to be averaged.
+    """
+    if not rows:
+        return 0
+    stamp = now_iso()
+    with engine.begin() as c:
+        for r in rows:
+            c.execute(sa.delete(labels).where(sa.and_(
+                labels.c.workout_id == r["workout_id"], labels.c.idx == r["idx"])))
+        c.execute(sa.insert(labels),
+                  [{"source": "human", **r, "labelled_at": stamp} for r in rows])
+    return len(rows)
+
+
+def clear_labels(engine: Engine, workout_id: int, set_id: int | None = None) -> int:
+    """Withdraw corrections, for a whole workout or one set of it."""
+    stmt = sa.delete(labels).where(labels.c.workout_id == workout_id)
+    if set_id is not None:
+        stmt = stmt.where(labels.c.set_id == set_id)
+    with engine.begin() as c:
+        return c.execute(stmt).rowcount
+
+
+def load_labels(engine: Engine, workout_id: int | None = None) -> dict:
+    """Corrections as {(workout_id, idx): stroke}."""
+    stmt = sa.select(labels.c.workout_id, labels.c.idx, labels.c.stroke)
+    if workout_id is not None:
+        stmt = stmt.where(labels.c.workout_id == workout_id)
+    with engine.connect() as c:
+        return {(r.workout_id, r.idx): r.stroke for r in c.execute(stmt)}
+
+
+def label_counts(engine: Engine) -> dict[str, int]:
+    """How many lengths are labelled per stroke — where the training data is thin."""
+    stmt = (sa.select(labels.c.stroke, sa.func.count())
+            .group_by(labels.c.stroke).order_by(sa.func.count().desc()))
+    with engine.connect() as c:
+        return {r[0]: r[1] for r in c.execute(stmt)}
 
 
 def save_model_params(engine: Engine, params: dict[str, dict[str, float]]) -> None:
