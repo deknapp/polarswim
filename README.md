@@ -28,7 +28,7 @@ polarswim --db sample/sample.db card 2026-08-19     # paste into Strava
 polarswim --db sample/sample.db report --from 2026-08-01
 polarswim --db sample/sample.db serve                # web UI on :8770
 
-.venv/bin/pytest -q                                 # 318 tests, no network
+.venv/bin/pytest -q                                 # 319 tests, no network
 ```
 
 Without the symlink, every command below is `.venv/bin/python -m polarswim ...`
