@@ -22,7 +22,7 @@ python -m polarswim --db sample/sample.db card 2026-08-19    # paste into Strava
 python -m polarswim --db sample/sample.db report --from 2026-08-01
 python -m polarswim --db sample/sample.db serve               # web UI on :8770
 
-pytest -q                                                    # 247 tests, no network
+pytest -q                                                    # 249 tests, no network
 ```
 
 `sample/sample.db` holds six real swims — 406 lengths and 16,810 heart-rate samples.
@@ -261,7 +261,9 @@ Medleys are ranked as their own events. A 100 IM belongs beside other 100 IMs, n
 beside 100 frees, and a continuous round no longer competes for the single-stroke
 best of whichever leg happened to be its mode — that had a 100 IM standing as the 100
 backstroke record. A leg of a *broken* medley stays eligible, since a 25 off the wall
-is a 25 either way. 28 rounds across the history.
+is a 25 either way. 16 rounds across the history — all continuous, and both
+apparent broken sets turned out to be sets whose rep count was not a multiple of
+four, matching only once truncated to fit.
 
 ## Personal bests, at distances that mean something
 

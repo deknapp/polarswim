@@ -454,8 +454,14 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
 # not need to name each stroke, only to recognise the repeating four-part shape.
 IM_ORDER = ("butterfly", "backstroke", "breaststroke", "freestyle")
 IM_MIN_ROUNDS = 2          # one four-part round alone is not evidence; see below
-IM_SEPARATION = 1.5        # positions must differ more than they wobble
-IM_MIN_SPREAD = 0.08       # and differ by enough to not be a flat freestyle set
+# The four legs are four different strokes, so they must differ by more than the
+# same stroke varies from round to round — by a clear factor, not a hair. Both
+# thresholds are judgment calls, and the detector is sensitive to them: relaxing
+# them to 1.5 and 0.08 takes this swimmer's history from 16 rounds to 24, the
+# extra ones all marginal. They are set where a leg-to-leg difference is
+# unambiguous rather than where the count looks generous.
+IM_SEPARATION = 2.0        # positions differ at twice their round-to-round wobble
+IM_MIN_SPREAD = 0.12       # and by at least 12%, so a flat freestyle set is out
 # A medley covers all four strokes equally, which in a 25 yd pool makes exactly
 # three distances. Four 75s share the period-4 shape but total 300, which is not
 # an event anyone swims, so requiring a real distance rejects a whole class of
@@ -545,11 +551,15 @@ def detect_im(df: pd.DataFrame) -> list[IMRound]:
                             splits_s=[float(x) for x in matrix[i - 1]]))
                     continue
 
-        # Broken: each rep is one leg, so four consecutive reps make a round.
-        if uniform and len(reps) >= 4 * IM_MIN_ROUNDS:
+        # Broken: each rep is one leg, so four consecutive reps make a round. The
+        # rep count must be an exact multiple of four — a medley set is written as
+        # 4, 8 or 12 reps, and truncating a 9x50 down to its first eight to make
+        # the shape fit is fitting the data to the hypothesis. That rule alone
+        # removed both broken rounds this swimmer's history appeared to contain.
+        if uniform and len(reps) >= 4 * IM_MIN_ROUNDS and len(reps) % 4 == 0:
             times = np.array([float(r["duration_s"].sum()) for _, r in reps])
             n_rounds = len(times) // 4
-            matrix = times[:n_rounds * 4].reshape(n_rounds, 4)
+            matrix = times.reshape(n_rounds, 4)
             rep_yd = int(round(len(reps[0][1]) * pool_yd))
             if rep_yd * 4 in IM_DISTANCES_YD and _im_signature(matrix):
                 for i in range(n_rounds):

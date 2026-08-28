@@ -391,3 +391,15 @@ class TestMedleyDetection:
         df = analyze.add_features(
             analyze.assign_sets(_lengths(blown, gaps=gaps)), {})
         assert all(r.yards in analyze.IM_DISTANCES_YD for r in analyze.detect_im(df))
+
+    def test_a_set_that_is_not_a_multiple_of_four_is_not_truncated_to_fit(self):
+        """A 9x50 is not two medley rounds plus a spare. Dropping the ninth rep to
+        make the shape fit is fitting the data to the hypothesis."""
+        durations = [31, 28, 30, 24] * 2 + [26]
+        df = analyze.add_features(
+            analyze.assign_sets(_lengths(durations, gaps=[20] * 9)), {})
+        assert analyze.detect_im(df) == []
+
+    def test_legs_that_barely_differ_are_not_called_a_medley(self):
+        """Four strokes differ by much more than one stroke varies between rounds."""
+        assert analyze.detect_im(self._im_set(legs=(27, 28, 27, 26))) == []
