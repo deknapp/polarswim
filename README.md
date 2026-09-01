@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 327 tests, no network
+.venv/bin/pytest -q                                # 332 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -228,10 +228,16 @@ instead of silently picking one.
 ## Web UI
 
 ```
-polarswim serve
+polarswim up        # sync the latest swims, then open the dashboard
+polarswim serve     # dashboard only, no sync
 ```
 
-Then open **http://127.0.0.1:8770**. Swims are listed newest first; picking one shows
+`up` is the whole routine after a swim in one command: it pulls anything new from
+the last 30 days (`--from` widens that), classifies it, then starts the UI and
+opens a browser window at **http://127.0.0.1:8770**. A sync that fails — an expired
+credential, no network — is reported and the dashboard still comes up over what is
+already stored. `Start polarswim.command` in the project root does the same thing
+on a double-click. Swims are listed newest first; picking one shows
 a pace-per-length chart, a set-by-set table with **low-confidence stroke labels
 highlighted** so an estimate never reads as a measurement, a one-click copy of the
 Strava card, and the AI review. The date pickers run the season report over any

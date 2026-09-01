@@ -12,6 +12,7 @@ Dates are what a person actually remembers, so they are the intended form; the i
 is there because it is what the database and the web UI show.
     polarswim report [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]
     polarswim serve [--port 8770]   local web UI
+    polarswim up                    sync the latest swims, then open the UI
     polarswim reparse
 """
 
@@ -234,6 +235,26 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_up(args) -> int:
+    """Sync, then open the dashboard: the whole routine after a swim, one command.
+
+    A failed sync is not a reason to refuse to run — an expired credential or no
+    network still leaves every swim already in the database worth looking at — so
+    the failure is reported and the UI comes up anyway.
+    """
+    try:
+        cmd_sync(args)
+    except (AuthError, SessionExpired, FlowError) as e:
+        print(f"sync skipped: {e}\n", file=sys.stderr)
+
+    if not args.no_open:
+        import threading
+        import webbrowser
+        threading.Timer(
+            1.5, lambda: webbrowser.open(f"http://127.0.0.1:{args.port}")).start()
+    return cmd_serve(args)
+
+
 def cmd_reparse(args) -> int:
     """Re-run the parser over stored raw payloads. No network, no credential."""
     from .models import raw_payloads
@@ -299,6 +320,24 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("serve", help="local web UI")
     sv.add_argument("--port", type=int, default=8770)
     sv.set_defaults(func=cmd_serve)
+
+    up = sub.add_parser(
+        "up", help="sync the latest swims, then open the dashboard")
+    up.add_argument("--from", dest="date_from", type=_date,
+                    default=dt.date.today() - dt.timedelta(days=30),
+                    help="how far back to look for new sessions (default 30 days)")
+    up.add_argument("--to", dest="date_to", type=_date, default=dt.date.today())
+    up.add_argument("--limit", type=int, default=None)
+    up.add_argument("--force", action="store_true")
+    up.add_argument("--cookie", default=None)
+    up.add_argument("--cookie-source", choices=("auto", "browser", "file"),
+                    default="auto")
+    up.add_argument("--interval", type=float, default=0.4)
+    up.add_argument("--no-analyze", action="store_true")
+    up.add_argument("--port", type=int, default=8770)
+    up.add_argument("--no-open", action="store_true",
+                    help="serve without opening a browser window")
+    up.set_defaults(func=cmd_up)
 
     rs = sub.add_parser("reparse", help="re-run the parser over stored payloads")
     rs.set_defaults(func=cmd_reparse)

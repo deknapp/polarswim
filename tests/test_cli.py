@@ -26,7 +26,7 @@ def _concrete(token: str) -> str:
 
 
 SUBCOMMANDS = {"sync", "status", "analyze", "card", "review", "report",
-               "serve", "reparse"}
+               "serve", "up", "reparse"}
 
 
 def _invocations() -> list[list[str]]:
@@ -63,7 +63,8 @@ def _invocations() -> list[list[str]]:
 
 
 class TestParser:
-    @pytest.mark.parametrize("cmd", ["status", "reparse", "analyze", "report", "serve"])
+    @pytest.mark.parametrize(
+        "cmd", ["status", "reparse", "analyze", "report", "serve", "up"])
     def test_subcommand_parses_with_no_arguments(self, cmd):
         assert cli.build_parser().parse_args([cmd]).cmd == cmd
 
@@ -199,6 +200,42 @@ class TestSyncRunsTheAnalysis:
 
     def test_analysis_is_on_by_default(self):
         assert cli.build_parser().parse_args(["sync"]).no_analyze is False
+
+
+class TestUp:
+    """`up` is the one-command routine after a swim: sync, then open the UI."""
+
+    def test_the_default_window_is_recent_rather_than_a_year(self):
+        """`sync` backfills a year; `up` is run after a swim, so it only needs
+        the days since the last one, and a short window costs far fewer requests
+        against a rate-limited API and a one-hour credential."""
+        import datetime as dt
+        args = cli.build_parser().parse_args(["up"])
+        assert dt.date.today() - args.date_from == dt.timedelta(days=30)
+
+    def test_it_serves_on_the_same_default_port_as_serve(self):
+        parser = cli.build_parser()
+        assert parser.parse_args(["up"]).port == parser.parse_args(["serve"]).port
+
+    def test_a_failed_sync_still_brings_up_the_dashboard(self, monkeypatch, capsys):
+        """An expired credential is not a reason to refuse to show the swims
+        already stored."""
+        served = []
+        monkeypatch.setattr(cli, "cmd_sync", lambda a: (_ for _ in ()).throw(
+            cli.AuthError("no cookie")))
+        monkeypatch.setattr(cli, "cmd_serve", lambda a: served.append(a.port) or 0)
+        args = cli.build_parser().parse_args(["up", "--no-open"])
+
+        assert cli.cmd_up(args) == 0
+        assert served == [8770]
+        assert "no cookie" in capsys.readouterr().err
+
+    def test_it_syncs_before_it_serves(self, monkeypatch):
+        order = []
+        monkeypatch.setattr(cli, "cmd_sync", lambda a: order.append("sync") or 0)
+        monkeypatch.setattr(cli, "cmd_serve", lambda a: order.append("serve") or 0)
+        cli.cmd_up(cli.build_parser().parse_args(["up", "--no-open"]))
+        assert order == ["sync", "serve"]
 
 
 class TestSetupDocs:
