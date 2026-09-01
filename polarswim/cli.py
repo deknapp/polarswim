@@ -242,16 +242,24 @@ def cmd_up(args) -> int:
     network still leaves every swim already in the database worth looking at — so
     the failure is reported and the UI comes up anyway.
     """
+    synced = True
     try:
         cmd_sync(args)
     except (AuthError, SessionExpired, FlowError) as e:
-        print(f"sync skipped: {e}\n", file=sys.stderr)
+        synced = False
+        print(f"\n{'!' * 70}\nSYNC FAILED — the dashboard below shows STORED data only,\n"
+              f"so today's swim will not be in it.\n\n{e}\n{'!' * 70}\n",
+              file=sys.stderr)
 
     if not args.no_open:
         import threading
         import webbrowser
         threading.Timer(
             1.5, lambda: webbrowser.open(f"http://127.0.0.1:{args.port}")).start()
+    if not synced:
+        # Repeated here because the serve banner is the last thing on screen and
+        # the failure above has by now scrolled past it.
+        print("reminder: the sync failed — this is stored data, not today's.")
     return cmd_serve(args)
 
 

@@ -228,7 +228,20 @@ class TestUp:
 
         assert cli.cmd_up(args) == 0
         assert served == [8770]
-        assert "no cookie" in capsys.readouterr().err
+        out = capsys.readouterr()
+        assert "no cookie" in out.err
+
+    def test_a_failed_sync_says_so_loudly(self, monkeypatch, capsys):
+        """The quiet version of this cost a real sync: the notice scrolled past
+        under the serve banner and a stale dashboard read as a current one."""
+        monkeypatch.setattr(cli, "cmd_sync", lambda a: (_ for _ in ()).throw(
+            cli.AuthError("expired")))
+        monkeypatch.setattr(cli, "cmd_serve", lambda a: 0)
+        cli.cmd_up(cli.build_parser().parse_args(["up", "--no-open"]))
+
+        out = capsys.readouterr()
+        assert "SYNC FAILED" in out.err
+        assert "stored data" in out.out          # repeated after the scrollback
 
     def test_it_syncs_before_it_serves(self, monkeypatch):
         order = []
