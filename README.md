@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 367 tests, no network
+.venv/bin/pytest -q                                # 370 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -64,42 +64,46 @@ privacy concern in shipping it; no credentials, tokens, or API responses are inc
 a Strava description:
 
 ```
-🏊 2026-08-19   1,525 yd   47:03
+🏊 2026-08-19   1,525 yd   47:02
    61 lengths · avg 126 bpm · load 50/int 67
+   swam 29:01 · rest 18:01 (38%) · 1:54 /100 yd
 
 set · time · zone · speed · pace/50
 🟦 3×50 free · 58s · ⚪Z1 · 11% · 58s
 🟦 1×75 free · 1:23 · ⚪Z1 · — · 55s
-⬜ 1×25 drll · 34s · ⚪Z1 · 16% · 67s
+⬜ 1×25 drll · 34s · ⚪Z1 · — · 67s
 🟦 1×50 free · 59s · ⚪Z1 · 9% · 59s
-⬛ 1×25 ? · 30s · ⚪Z1 · 36% · 59s
+⬛ 1×25 ? · 30s · ⚪Z1 · — · 59s
 ⬜ 1×75 drll · 1:39 · ⚪Z1 · — · 66s ★
-🟪 1×100 fly · 2:10 · 🔵Z2 · — · 65s ★
+🟪 1×100 fly · 2:09 · 🔵Z2 · — · 65s ★
 🟦 1×50 free · 54s · 🔵Z2 · 32% · 54s
-🟩 2×50 back · 1:02 · 🔵Z2 · 15% · 62s ★
+🟩 2×50 back · 1:01 · 🔵Z2 · — · 62s ★
 🟦 1×50 free · 54s · 🔵Z2 · 29% · 54s
 🟦 1×25 free · 24s · ⚪Z1 · 69% · 48s
 🟦 1×50 free · 41s · 🟢Z3 · 91% · 41s
-🟩 1×50 back · 1:04 · 🟢Z3 · 7% · 64s
-🟪 1×50 fly · 1:03 · 🔵Z2 · 11% · 63s
+🟩 1×50 back · 1:04 · 🟢Z3 · — · 64s
+🟪 1×50 fly · 1:03 · 🔵Z2 · — · 63s
 🟦 3×50 free · 48s · 🟢Z3 · 68% · 48s
-🟪 1×50 fly · 52s · 🟢Z3 · 49% · 52s ★
-🟩 4×50 back · 1:02 · 🟢Z3 · 15% · 62s ★
+🟪 1×50 fly · 52s · 🟢Z3 · — · 52s ★
+🟩 4×50 back · 1:01 · 🟢Z3 · — · 62s ★
 🟦 2×50 free · 52s · ⚪Z1 · 38% · 52s
-⬜ 1×25 drll · 39s · ⚪Z1 · 3% · 78s
+⬜ 1×25 drll · 39s · ⚪Z1 · — · 78s
 🟦 2×25 free · 24s · ⚪Z1 · 69% · 48s
 🟦 1×50 free · 53s · ⚪Z1 · 34% · 53s
 🟦 1×25 free · 21s · ⚪Z1 · 88% · 42s
 
-🟦 free    825 yd    54%
-🟩 back    350 yd    23%
-🟪 fly     200 yd    13%
-⬜ drll    125 yd     8%
-⬛ ?        25 yd     2%
+stroke · distance · share · pace/100
+🟦 free    825 yd    54%   1:45
+🟩 back    350 yd    23%   2:03
+🟪 fly     200 yd    13%   2:02
+⬜ drll    125 yd     8%   2:18
+⬛ ?        25 yd     2%   1:58
+
+🏅 swimming only  1,375 yd (90%)  1:52 /100 yd
 
 ⚪Z1 57%  🔵Z2 15%  🟢Z3 26%  🟠Z4 2%
-speed = your own percentile at that distance
-★ = personal best
+speed = your own percentile at that distance and stroke
+★ = personal best · drill and unknown sets are not ranked
 
 — polarswim
 ```
@@ -125,6 +129,50 @@ the same grouping.
 Statistics are still computed over the **set**, because pooling every rep of the
 same distance gives far more lengths to estimate a median and a spread from.
 
+## Swim time, and the pace that goes with it
+
+Polar's own summary of a swim leads with two durations — **1:31:01 elapsed over
+50:15 swum** — and quotes pace against the second. For a long time this app carried
+only the first, so an hour and a half of pool time read as the swim, and no pace
+appeared anywhere at all: the one number a swimmer actually checks.
+
+Both are recoverable exactly, without any new data. The sensor times a length only
+while it is being swum, so the sum of the length records **is** the swim time, and
+rest is what the elapsed clock has left over. On my 2026-09-04 swim that reproduces
+Polar's 50:15 and its 1:56 / 100 yd to the second.
+
+Pace is quoted against the distance the **watch** reported, so the two reconcile.
+Where a missed turn was repaired the real distance is longer — a fused record covers
+two lengths — and that figure rides alongside rather than silently replacing the
+watch's. Polar's distance is data; the repair is inference.
+
+Then the same question, asked three ways:
+
+| | 2026-09-04 |
+|---|---|
+| everything | 2,600 yd · **1:56** / 100 yd |
+| freestyle | 1,475 yd · **1:42** |
+| butterfly | 575 yd · **1:49** |
+| backstroke | 200 yd · **1:57** |
+| breaststroke | 50 yd · **2:14** |
+| drill / kick | 175 yd · 3:41 |
+| unidentified | 150 yd · 2:09 |
+| **swimming only** | 2,300 yd (88%) · **1:46** / 100 yd |
+
+The last row is the point of the exercise. It drops drill, kick and every length the
+classifier could not name a stroke for — the two classes that are not strokes. A set
+of single-arm drill is slow *because* it is drill, and leaving it in the average
+makes a good session read as a bad one: ten seconds per 100 separate the two numbers
+above. The same row appears on the card, the dashboard, the PNG, and in what the AI
+review is given, and the summary tab asks it of the whole history at once (61.2 h
+swimming of 91.1 h pool time, 1:45 / 100 yd over 181,000 yd of actual swimming).
+
+The best-length figure runs through the same artifact filter as personal bests. A
+spurious wall is only recognised as a split when its matching pair is found, and an
+unmatched one survives as a single impossibly fast record — which showed up as a
+lifetime "best length" of 0:34 / 100 yd, 8.5 s for 25 yards. Polar reports these
+unfiltered; matching it is not worth quoting a time nobody swam.
+
 ## Swimmer-calibrated metrics
 
 The dashboard adds three columns, each referenced to this swimmer rather than a
@@ -145,11 +193,28 @@ rather than merely brisk. It is also the scheme most training plans use, which
 matters for a number someone might compare against their own.
 
 **Relative speed.** A rep's percentile against this swimmer's own reps of the **same
-distance**. Ranking within an inferred stroke was tried and rejected as circular: the
-classifier assigns fast lengths to freestyle, so a freestyle percentile mostly
-re-expresses the classifier's threshold, and it collapsed every slow length to 0%.
-Distance is measured rather than inferred, so it carries no such feedback loop.
-A distance with fewer than 30 reps reports nothing instead of a fragile number.
+distance and stroke** — or no percentile at all. Both halves matter.
+
+Distance alone is not enough: it ranks a backstroke 100 against a field of mostly
+freestyle 100s. That survived for a while as a fallback wherever a distance/stroke
+pair was thin, and it was worse than reporting nothing, because a wrong number is
+harder to discount than a blank. A 30 s backstroke 25 came back at 49% purely by
+being measured against 401 freestyle reps, while the same 30 s read 0% wherever real
+backstroke history existed. There is no fallback now; under 15 comparable reps, the
+row reports nothing.
+
+Drill, kick and unidentified sets are not ranked either. They are the classifier
+declining to name a stroke, not strokes. Ranked against other drill, a 68 s "50" of
+kick came back at the 80th percentile, which reads as having swum a fast 50.
+
+What remains is a caveat that can only be disclosed, not engineered away here: the
+stroke labels are inferred **from pace**, so each stroke's population is partly a
+pace bin. This swimmer's freestyle 25s span 16.8–28.8 s and their breaststroke 25s
+29.6–34.4 s — ranges that barely touch — so an identical 30 s 25 reads 0% as
+freestyle and 84% as breaststroke, because the labels differ and not the swims. Reps
+carry an `edge` flag where they sit at or past the end of the range their own label
+spans. The only real fix is ground truth: corrections saved in the editor train the
+model on something other than pace and break the circle.
 
 **Personal best.** The fastest recorded time at a distance and stroke, grouped into
 a tab per stroke and led by the distances that stroke is actually raced at. Two
@@ -183,11 +248,13 @@ full analysis as a PNG you can attach to the activity as a photo:
 ![The analysis exported as a PNG: a stroke-mix donut, and a table of sets with
 effort zone, speed percentile, pace per 50 and rest](docs/workout-card.png)
 
-Stroke-mix donut, per-set table with heart-rate zones, relative speed, pace per 50
-and personal bests, a labelled header for every column, and a key explaining each
-one. The `3×100 IM` row is a medley identified by its structure; the `4×50 free`
-and `3×50 breast` are one set that Polar recorded as seven 50s, split where the
-stroke changes. It is built server-side as SVG and rasterised in the browser through a canvas,
+Stroke-mix donut with a pace beside every stroke, swim time and average pace under
+the header, a per-set table with heart-rate zones, relative speed, pace per 50 and
+personal bests, a labelled header for every column, and a key explaining each one.
+The `3×100 IM` row is a medley identified by its structure. The `1×125` and `1×100`
+are one set that Polar recorded as two 100s: the sensor missed a wall on the first,
+so it really covered five lengths, and the row is split so each is ranked against
+the distance it actually was. It is built server-side as SVG and rasterised in the browser through a canvas,
 so it needs no plotting library and no external script. The SVG deliberately avoids
 `foreignObject` and any external reference, both of which taint a canvas and would
 make the export fail silently; a test enforces that.

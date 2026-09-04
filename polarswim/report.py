@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -87,6 +86,12 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
     difference was not cosmetic: `metrics` files those reps at their true distance
     while this function filed them one length short, so a repaired 50 was ranked
     against the swimmer's 25s and could never match its own personal best.
+
+    Which means a row splits on distance as well as on stroke. `assign_sets`
+    groups reps by RECORD count, so a repaired rep lands in a set beside reps that
+    are genuinely shorter, and summarising the two together has no honest answer:
+    the median of a 100 and a 125 is `2×112`, a distance nobody swam. Splitting
+    gives `1×100` and `1×125`, each ranked against its own real distance.
     """
     repairs = repairs or set()
     out = []
@@ -114,10 +119,10 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                              if "rest_before_s" in r.columns else 0.0,
         } for rid, r in reps]
 
-        # Consecutive intervals of the same stroke become one row.
+        # Consecutive intervals of the same stroke AND distance become one row.
         runs: list[list[dict]] = []
         for d in detail:
-            if runs and runs[-1][0]["stroke"] == d["stroke"]:
+            if runs and all(runs[-1][0][k] == d[k] for k in ("stroke", "yards")):
                 runs[-1].append(d)
             else:
                 runs.append([d])
@@ -127,10 +132,7 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             sub = g[g["rep_id"].isin(rep_ids)]
             sub_reps = sub.groupby("rep_id")
             n_reps = len(run)
-            # Median, like the time beside it: a set is grouped by record count,
-            # so one repaired rep inside it is genuinely longer than its siblings
-            # and must not rename the whole row after itself.
-            rep_yards = int(np.median([d["yards"] for d in run]))
+            rep_yards = run[0]["yards"]          # every rep in a run now shares it
             rep_seconds = float(sub_reps["duration_s"].sum().median())
             note = "repaired" if repairs and any((r.workout_id, r.idx) in repairs
                                                  for r in sub.itertuples()) else ""

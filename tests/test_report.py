@@ -177,6 +177,29 @@ class TestRepDistanceCountsRealLengths:
         rows = report.sets_for_workout(df)
         assert rows[0]["rep_yards"] == 125
 
+    def test_a_set_splits_where_the_real_distance_changes(self):
+        """`assign_sets` groups reps by RECORD count, so a repaired rep lands
+        beside genuinely shorter ones. Summarising them together produced
+        `2x112` — the median of a 100 and a 125, a distance nobody swam."""
+        df = _lengths([(30.0, "freestyle")] * 8)
+        df["rep_id"] = [1, 1, 1, 1, 2, 2, 2, 2]     # two 100s by record count
+        df.loc[0, "length_factor"] = 2.0            # the first was really a 125
+        rows = report.sets_for_workout(df)
+        assert [(r["reps"], r["rep_yards"]) for r in rows] == [(1, 125), (1, 100)]
+
+    def test_a_set_of_matching_reps_stays_one_row(self):
+        df = _lengths([(30.0, "freestyle")] * 8)
+        df["rep_id"] = [1, 1, 1, 1, 2, 2, 2, 2]
+        rows = report.sets_for_workout(df)
+        assert [(r["reps"], r["rep_yards"]) for r in rows] == [(2, 100)]
+
+    def test_no_row_ever_reports_a_distance_no_rep_swam(self):
+        df = _lengths([(30.0, "freestyle")] * 8)
+        df["rep_id"] = [1, 1, 1, 1, 2, 2, 2, 2]
+        df.loc[0, "length_factor"] = 2.0
+        for row in report.sets_for_workout(df):
+            assert {d["yards"] for d in row["reps_detail"]} == {row["rep_yards"]}
+
     def test_an_unrepaired_rep_is_unchanged(self):
         df = _lengths([(30.0, "freestyle")] * 4)
         df["rep_id"] = 1
