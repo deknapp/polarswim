@@ -11,15 +11,24 @@ formula or a population table, which matters more in swimming than in most sport
 
   * **Speed.** A rep is ranked against this swimmer's other reps of the same
     **distance and stroke** — "this backstroke 50 was faster than 62% of your
-    backstroke 50s". Distance alone was tried first and is wrong: it ranks a
-    backstroke 100 against a field of mostly freestyle 100s, pushing every
-    non-freestyle set to the bottom regardless of how well it was swum.
+    backstroke 50s" — or it is not ranked at all. Distance alone was tried first
+    and is wrong: it ranks a backstroke 100 against a field of mostly freestyle
+    100s. It survived for a while as a fallback for thin pairs, which was worse
+    than dropping it, because a wrong number is harder to discount than a blank:
+    a 30 s backstroke 25 came back at 49% purely by being measured against 401
+    freestyle reps, while the same 30 s read 0% wherever real backstroke history
+    existed. The fallback is gone.
 
-    Ranking within an inferred stroke is mildly circular — the classifier assigns
-    fast lengths to freestyle — but comparing strokes against each other is the
-    larger error, so stroke is used and the basis is reported. Where a
-    distance/stroke pair is too thin to rank, it falls back to distance alone and
-    says so, and where even that is too thin it reports nothing.
+    What remains is a caveat that cannot be engineered away here, only disclosed.
+    The stroke labels are inferred FROM PACE, so each stroke's population is
+    partly a pace bin: this swimmer's freestyle 25s run 16.8-28.8 s and their
+    breaststroke 25s 29.6-34.4 s, ranges that barely touch. A rep at the slow edge
+    of its own label reads near 0% whatever it was, and an identical 30 s 25 is
+    0% as freestyle and 84% as breaststroke — not because the swims differ, but
+    because the labels do. Reps therefore carry `edge`, true where the rep sits at
+    or past the end of the range its own label spans, and the only real fix is
+    ground truth: corrections saved through the editor train the model on
+    something other than pace and break the circle.
 
   * **Personal bests.** The fastest recorded time for a given distance and stroke.
     Two caveats are built in. Stroke labels are inferred rather than measured, so a
@@ -68,8 +77,11 @@ SPEED_COLORS = [
     (60, "#3ddc84"), (80, "#f0a848"), (95, "#f0645a"),
 ]
 
-MIN_OBSERVATIONS = 30      # distance-only fallback needs this many reps
-MIN_OBSERVATIONS_STROKE = 15   # a distance/stroke pair is narrower, so accept fewer
+# A distance/stroke pair needs this many reps before a percentile off it means
+# anything. Below it the rep is left unranked: there is no distance-only fallback,
+# because ranking one stroke against a field of another is a wrong answer rather
+# than a rough one.
+MIN_OBSERVATIONS_STROKE = 15
 
 # The distances actually raced in a 25 yd pool. A practice throws off bests at
 # every distance a set happens to be written at — 75s, 125s, 150s — and burying
@@ -164,36 +176,39 @@ class SwimmerReference:
     # --- speed --------------------------------------------------------------
     def speed_percentile(self, yards: int, seconds: float,
                          stroke: str | None = None) -> dict | None:
-        """How a rep ranks against comparable reps of the swimmer's own.
+        """How a rep ranks against this swimmer's own reps of the same event.
 
-        Prefers the same distance AND stroke; falls back to distance alone when
-        that pair is too thin, and reports which basis was used so the caller can
-        show it. Higher is better, even though the underlying time is
-        lower-is-faster.
+        Same distance AND same stroke, or nothing. There used to be a fallback to
+        distance alone when the pair was thin, and it was worse than useless: at
+        25 yd the distance-only field is 401 freestyle reps against 9 backstroke,
+        so a 30 s backstroke 25 came back at 49% — a respectable-looking number
+        produced entirely by ranking backstroke against freestyle. The same 30 s
+        against actual backstroke history is a different question with a different
+        answer, and where there is not enough history to ask it, the honest reply
+        is no number rather than a flattering one.
+
+        Higher is better, even though the underlying time is lower-is-faster.
+
+        The unavoidable caveat, which the caller must surface: the stroke labels
+        are inferred FROM PACE, so each stroke's population is partly a pace bin.
+        This swimmer's freestyle 25s top out at 28.8 s not because they never swim
+        a slower 25 but because a slower one gets called something else. A rep at
+        the slow edge of its own stroke will therefore read near 0% no matter how
+        it was swum, and only real corrections can break that circle.
         """
-        if not np.isfinite(seconds):
+        if not np.isfinite(seconds) or not stroke:
             return None
-
-        history, basis = None, None
-        if stroke:
-            candidate = self.rep_times_by_distance_stroke.get((int(yards), stroke))
-            if candidate is not None and len(candidate) >= MIN_OBSERVATIONS_STROKE:
-                history, basis = candidate, "stroke"
-        if history is None:
-            candidate = self.rep_times_by_distance.get(int(yards))
-            if candidate is not None and len(candidate) >= MIN_OBSERVATIONS:
-                history, basis = candidate, "distance"
-        if history is None:
+        history = self.rep_times_by_distance_stroke.get((int(yards), stroke))
+        if history is None or len(history) < MIN_OBSERVATIONS_STROKE:
             return None
 
         pct = float((history > seconds).mean() * 100.0)    # invert: low time = fast
-        colour = SPEED_COLORS[0][1]
-        for threshold, c in SPEED_COLORS:
-            if pct >= threshold:
-                colour = c
-        return {"percentile": round(pct), "color": colour, "n": int(len(history)),
-                "distance": int(yards), "basis": basis,
-                "stroke": stroke if basis == "stroke" else None}
+        return {"percentile": round(pct), "color": self._pct_colour(pct),
+                "n": int(len(history)), "distance": int(yards), "basis": "stroke",
+                "stroke": stroke,
+                # True when the rep sits outside the range the label itself
+                # spans, which is where the pace-binning above bites hardest.
+                "edge": bool(seconds >= history.max() or seconds <= history.min())}
 
     def im_percentile(self, yards: int, seconds: float) -> dict | None:
         """How a medley round ranks against this swimmer's other medleys.
@@ -282,8 +297,16 @@ class SwimmerReference:
     # --- personal bests -----------------------------------------------------
     def check_pr(self, yards: int, stroke: str, seconds: float,
                  workout_id: int) -> bool:
-        """True when this workout holds the fastest time at this distance/stroke."""
-        best = self.best_rep.get((yards, stroke))
+        """True when this workout holds the fastest time at this distance/stroke.
+
+        Medleys are looked up in their own table. `best_rep` is built with medley
+        reps deliberately excluded — a 100 IM must not win the 100 backstroke just
+        because backstroke was its modal length — with the consequence that a
+        medley best could never be found here at all, and a personal-best 200 IM
+        went unmarked on every card it appeared on.
+        """
+        best = (self.best_im.get(int(yards)) if stroke == "IM"
+                else self.best_rep.get((yards, stroke)))
         return bool(best and best["workout_id"] == workout_id
                     and abs(best["seconds"] - seconds) < 0.5)
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -79,12 +80,21 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
     So a set is split wherever the stroke changes, into `4×50 free` and
     `3×50 brst`. Rows keep their original `set_id` and carry a `part` index, so
     the corrections editor can still group them back into the set they came from.
+
+    A rep's distance counts the lengths it REALLY covers, via `length_factor`, not
+    the number of records the sensor wrote for it. The two differ on the 50 reps
+    in this history where a missed wall fused two lengths into one record, and the
+    difference was not cosmetic: `metrics` files those reps at their true distance
+    while this function filed them one length short, so a repaired 50 was ranked
+    against the swimmer's 25s and could never match its own personal best.
     """
     repairs = repairs or set()
     out = []
     pool_yd = 25
     if "pool_m" in df.columns and df["pool_m"].notna().any():
         pool_yd = int(round(float(df["pool_m"].iloc[0]) / 0.9144))
+    if "length_factor" not in df.columns:
+        df = df.assign(length_factor=1.0)
 
     for sid, g in df.groupby("set_id"):
         reps = list(g.groupby("rep_id"))
@@ -92,7 +102,7 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             "rep_id": int(rid),
             "seconds": float(r["duration_s"].sum()),
             "lengths": int(len(r)),
-            "yards": int(round(len(r))) * pool_yd,
+            "yards": int(round(float(r["length_factor"].sum()) * pool_yd)),
             # A medley interval is one of each stroke, so its mode is a four-way
             # tie that pandas breaks alphabetically into 'backstroke'. Same trap
             # as the set label, one level down.
@@ -117,7 +127,10 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             sub = g[g["rep_id"].isin(rep_ids)]
             sub_reps = sub.groupby("rep_id")
             n_reps = len(run)
-            rep_yards = run[0]["yards"]
+            # Median, like the time beside it: a set is grouped by record count,
+            # so one repaired rep inside it is genuinely longer than its siblings
+            # and must not rename the whole row after itself.
+            rep_yards = int(np.median([d["yards"] for d in run]))
             rep_seconds = float(sub_reps["duration_s"].sum().median())
             note = "repaired" if repairs and any((r.workout_id, r.idx) in repairs
                                                  for r in sub.itertuples()) else ""
@@ -150,10 +163,19 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             if ref is not None:
                 row["hr_zone"] = ref.hr_zone(_absolute_hr(sub))
                 fastest = float(sub_reps["duration_s"].sum().min())
-                row["speed"] = (ref.im_percentile(rep_yards, rep_seconds)
-                                if row["stroke"] == "IM"
-                                else ref.speed_percentile(rep_yards, rep_seconds,
-                                                          row["stroke"]))
+                # Drill, kick and unidentified lengths get no speed percentile.
+                # They were ranked against other drill and kick, which reads as a
+                # speed score and is not one: a 68 s "50" of kick came back at the
+                # 80th percentile, and the swimmer reasonably read that as having
+                # swum a fast 50. There is no swimming speed to report for a set
+                # that was not swum as a stroke.
+                if row["stroke"] in analyze.UNNAMED_STROKES:
+                    row["speed"] = None
+                elif row["stroke"] == "IM":
+                    row["speed"] = ref.im_percentile(rep_yards, rep_seconds)
+                else:
+                    row["speed"] = ref.speed_percentile(rep_yards, rep_seconds,
+                                                        row["stroke"])
                 row["pr"] = ref.check_pr(rep_yards, row["stroke"], fastest,
                                          int(sub["workout_id"].iloc[0]))
                 row["best_rep_s"] = fastest

@@ -18,7 +18,14 @@ def ref():
         25: np.sort(np.array([24.0 + i * 0.1 for i in range(100)])),
         200: np.array([200.0, 210.0]),          # too few to rank
     }
+    r.rep_times_by_distance_stroke = {
+        (50, "freestyle"): np.sort(np.array([50.0 + i * 0.1 for i in range(100)])),
+        (25, "freestyle"): np.sort(np.array([24.0 + i * 0.1 for i in range(100)])),
+        (200, "freestyle"): np.array([200.0, 210.0]),      # too few to rank
+    }
     r.best_rep = {(50, "freestyle"): {"seconds": 44.0, "workout_id": 7, "date": "2026-05-01"}}
+    r.best_im = {200: {"seconds": 168.0, "workout_id": 7, "date": "2026-05-01",
+                       "continuous": True, "splits_s": [], "n_rounds": 4}}
     return r
 
 
@@ -62,31 +69,42 @@ class TestHeartRateZones:
 
 
 class TestRelativeSpeed:
-    """Ranked against the same distance, because distance is measured and stroke
-    is only inferred — ranking within an inferred stroke would be circular."""
+    """Ranked against the swimmer's own reps at the same distance AND stroke."""
 
     def test_a_fast_rep_ranks_high(self, ref):
-        assert ref.speed_percentile(50, 50.0)["percentile"] >= 95
+        assert ref.speed_percentile(50, 50.0, "freestyle")["percentile"] >= 95
 
     def test_a_slow_rep_ranks_low(self, ref):
-        assert ref.speed_percentile(50, 59.9)["percentile"] <= 5
+        assert ref.speed_percentile(50, 59.9, "freestyle")["percentile"] <= 5
 
     def test_the_median_ranks_near_fifty(self, ref):
-        assert 45 <= ref.speed_percentile(50, 55.0)["percentile"] <= 55
+        assert 45 <= ref.speed_percentile(50, 55.0, "freestyle")["percentile"] <= 55
 
     def test_thin_history_reports_nothing_rather_than_guessing(self, ref):
-        assert ref.speed_percentile(200, 205.0) is None
+        assert ref.speed_percentile(200, 205.0, "freestyle") is None
 
     def test_unknown_distance_reports_nothing(self, ref):
-        assert ref.speed_percentile(500, 400.0) is None
+        assert ref.speed_percentile(500, 400.0, "freestyle") is None
+
+    def test_a_rep_with_no_stroke_cannot_be_ranked(self, ref):
+        """Distance alone means ranking one stroke against a field of another."""
+        assert ref.speed_percentile(50, 55.0) is None
 
     def test_result_carries_its_sample_size(self, ref):
-        assert ref.speed_percentile(50, 55.0)["n"] == 100
+        assert ref.speed_percentile(50, 55.0, "freestyle")["n"] == 100
 
     def test_faster_reps_never_rank_below_slower_ones(self, ref):
-        a = ref.speed_percentile(50, 51.0)["percentile"]
-        b = ref.speed_percentile(50, 57.0)["percentile"]
+        a = ref.speed_percentile(50, 51.0, "freestyle")["percentile"]
+        b = ref.speed_percentile(50, 57.0, "freestyle")["percentile"]
         assert a > b
+
+    def test_a_rep_past_the_end_of_its_own_label_is_flagged(self, ref):
+        """The labels are inferred from pace, so each stroke's history is partly
+        a pace bin with a hard edge. A rep at that edge reads 0% or 100% for a
+        reason that is about the label, not the swim, and says so."""
+        assert ref.speed_percentile(50, 70.0, "freestyle")["edge"]
+        assert ref.speed_percentile(50, 40.0, "freestyle")["edge"]
+        assert not ref.speed_percentile(50, 55.0, "freestyle")["edge"]
 
 
 class TestPersonalBests:
@@ -211,14 +229,12 @@ class TestStrokeAwareSpeed:
         out = ref.speed_percentile(100, 128.0, "backstroke")
         assert out["basis"] == "stroke" and out["stroke"] == "backstroke"
 
-    def test_stroke_ranking_is_fairer_than_distance_ranking(self, ref):
-        by_stroke = ref.speed_percentile(100, 128.0, "backstroke")["percentile"]
-        by_distance = ref.speed_percentile(100, 128.0)["percentile"]
-        assert by_stroke > by_distance
-
-    def test_falls_back_to_distance_when_the_stroke_is_thin(self, ref):
-        out = ref.speed_percentile(100, 121.0, "butterfly")
-        assert out["basis"] == "distance" and out["stroke"] is None
+    def test_a_thin_stroke_is_not_ranked_against_another_strokes_field(self, ref):
+        """Butterfly has two 100s on record and the distance-only field is 200
+        reps of mostly freestyle. Ranking against that field returned a number
+        near 100% — a flattering measurement of the wrong thing, and harder to
+        discount than a blank, so there is no longer a fallback to it."""
+        assert ref.speed_percentile(100, 121.0, "butterfly") is None
 
     def test_reports_nothing_when_neither_has_history(self, ref):
         assert ref.speed_percentile(400, 300.0, "freestyle") is None
