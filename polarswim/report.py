@@ -161,6 +161,114 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
     return out
 
 
+# Pace is quoted per 100 yards because that is the unit Polar's own summary uses,
+# and a figure meant to be checked against the watch has to be in the watch's
+# unit. Per-50 stays on the set rows, where a swimmer reads intervals.
+PACE_YARDS = 100.0
+
+
+def pace_summary(df: pd.DataFrame, header: dict | None = None) -> dict:
+    """Time and pace as the watch reports them, then as the swim actually went.
+
+    Polar's own summary gives two durations — 1:31:01 elapsed over 50:15 swum —
+    and quotes pace against the second, not the first. The card and the dashboard
+    carried only the first, so an hour and a half of pool time read as the swim
+    and no pace appeared anywhere. Both figures are recoverable exactly: swim time
+    is the sum of the length records (the sensor only times a length while it is
+    being swum), and average pace is that over the distance. On the 2026-09-04
+    swim this reproduces Polar's 50:15 and 1:56 /100 yd to the second.
+
+    Three views, in widening honesty:
+
+      total       every length, matching the watch
+      by_stroke   one row per inferred stroke, so a breaststroke set is not
+                  averaged into a freestyle number
+      confident   only the lengths the classifier could name a stroke for. Drill,
+                  kick and everything it could not identify are dropped, which is
+                  the whole point: a set of single-arm drill is slow because it is
+                  drill, and leaving it in the average makes a good swim look bad.
+
+    The headline pace is quoted against the distance the WATCH reported, so it
+    reconciles with Polar to the second and can be checked against it. Where a
+    missed turn was repaired the real distance is longer — a fused record covers
+    two lengths — and that figure is carried separately as `repaired_pace_100_s`
+    rather than silently replacing the one on the watch. Polar's distance is data
+    and the repair is inference; the two are never conflated. The per-stroke rows
+    have no choice but to use the repaired distance, since the watch does not
+    break its total down by stroke.
+    """
+    header = header or {}
+    if df is None or df.empty:
+        return {}
+
+    d = df.copy()
+    if "length_factor" not in d.columns:
+        d["length_factor"] = 1.0
+    d["yards"] = d["length_factor"] * d["pool_m"] / 0.9144
+
+    swim_s = float(d["duration_s"].sum())
+    total_yd = float(d["yards"].sum())
+    elapsed_s = float(header.get("duration_s") or swim_s)
+    reported_yd = round((header.get("distance_m") or 0) / 0.9144) or round(total_yd)
+
+    def block(g: pd.DataFrame) -> dict:
+        seconds = float(g["duration_s"].sum())
+        yards = float(g["yards"].sum())
+        return {
+            "lengths": int(len(g)),
+            "yards": int(round(yards)),
+            "seconds": round(seconds, 1),
+            "pace_100_s": round(seconds / (yards / PACE_YARDS), 1) if yards else None,
+        }
+
+    by_stroke = []
+    for stroke, g in d.groupby("predicted"):
+        row = block(g)
+        row["stroke"] = str(stroke)
+        row["pct"] = round(100 * row["yards"] / total_yd, 1) if total_yd else 0.0
+        row["confidence"] = round(float(g["confidence"].mean()), 2)
+        row["named"] = str(stroke) in analyze.NAMED_STROKES
+        by_stroke.append(row)
+    # Fastest first: the question these rows answer is "how quick is each stroke",
+    # and ordering by share instead buries a sprint stroke under the warm-up.
+    by_stroke.sort(key=lambda r: (r["pace_100_s"] is None, r["pace_100_s"]))
+
+    named = d[d["predicted"].isin(analyze.NAMED_STROKES)]
+    confident = None
+    if len(named):
+        confident = block(named)
+        confident["pct_of_yards"] = (round(100 * confident["yards"] / total_yd, 1)
+                                     if total_yd else 0.0)
+        confident["strokes"] = sorted(named["predicted"].unique().tolist())
+        # The best single length, on the repaired pace, so a length the sensor
+        # split in two cannot supply an impossible best.
+        best = named["pace_s"].min()
+        confident["best_100_s"] = (round(float(best) * PACE_YARDS / 25.0, 1)
+                                   if pd.notna(best) else None)
+
+    repaired_pace = (round(swim_s / (total_yd / PACE_YARDS), 1)
+                     if total_yd else None)
+    reported_pace = (round(swim_s / (reported_yd / PACE_YARDS), 1)
+                     if reported_yd else repaired_pace)
+    return {
+        "elapsed_s": round(elapsed_s, 1),
+        "swim_time_s": round(swim_s, 1),
+        "rest_s": round(max(0.0, elapsed_s - swim_s), 1),
+        "rest_pct": round(100 * max(0.0, elapsed_s - swim_s) / elapsed_s, 1)
+                    if elapsed_s else 0.0,
+        "yards": int(round(total_yd)),
+        "reported_yards": int(reported_yd),
+        "avg_pace_100_s": reported_pace,
+        # Only worth showing when a repair actually moved the distance; equal
+        # values would read as two different measurements of the same thing.
+        "repaired_pace_100_s": (repaired_pace
+                                if int(round(total_yd)) != int(reported_yd)
+                                else None),
+        "by_stroke": by_stroke,
+        "confident": confident,
+    }
+
+
 def _absolute_hr(g: pd.DataFrame) -> float:
     """Mean heart rate over a set, in bpm.
 

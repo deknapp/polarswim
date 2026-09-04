@@ -59,6 +59,18 @@ HR_LAG_S = 15                       # cardiac response lag when attributing HR
 CLASSES = ("freestyle", "backstroke", "breaststroke", "butterfly",
            "other", "undetermined")
 
+# Two of those six are not strokes. `other` is drill and kick — a length swum on
+# purpose, but not swum as a stroke — and `undetermined` is the classifier saying
+# it could not tell. Neither belongs in a number that answers "how well did I
+# swim", and neither can be ranked for speed: a single-arm drill is slow because
+# it is a drill, so putting it on the same pace scale as a freestyle 50 makes the
+# drill look terrible and the ranking meaningless.
+#
+# So the two lists are named once, here, and every summary that means "the
+# swimming" filters on NAMED_STROKES rather than re-deciding what counts.
+NAMED_STROKES = ("freestyle", "backstroke", "breaststroke", "butterfly")
+UNNAMED_STROKES = ("other", "undetermined")
+
 
 @dataclass
 class Repair:
