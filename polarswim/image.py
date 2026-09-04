@@ -18,7 +18,7 @@ import pandas as pd
 W = 1080                      # a comfortable width in the Strava feed
 PAD = 40
 ROW_H = 38
-HEAD_H = 210
+HEAD_H = 236          # three header lines: totals, time and pace, counts
 FOOT_H = 76
 
 BG = "#0f1419"
@@ -45,6 +45,20 @@ def _fmt_time(seconds: float) -> str:
     seconds = float(seconds or 0)
     if seconds < 60:
         return f"{seconds:.0f}s"
+    # Truncated, like a running clock and like the watch: 5461.5 s reads 1:31:01.
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _fmt_pace(seconds: float | None) -> str:
+    """A pace always reads as a clock, never as bare seconds.
+
+    Rounded rather than truncated: a pace is an average, and 116.0 s/100 yd is
+    the 1:56 the watch reports.
+    """
+    if seconds is None:
+        return "-"
     m, s = divmod(int(round(seconds)), 60)
     return f"{m}:{s:02d}"
 
@@ -74,8 +88,14 @@ def _pie(mix: list[dict], cx: float, cy: float, r: float) -> str:
 
 
 def workout_svg(header: dict, sets: list[dict], mix: list[dict],
-                zones: list[dict], hr_max: int, df: pd.DataFrame | None = None) -> str:
-    """Full summary graphic: totals, stroke mix, and the set table."""
+                zones: list[dict], hr_max: int, df: pd.DataFrame | None = None,
+                pace: dict | None = None) -> str:
+    """Full summary graphic: totals, time and pace, stroke mix, and the set table.
+
+    `pace` is `report.pace_summary`. Without it the graphic reports only the
+    elapsed clock, which counts every minute spent standing on the wall — 1:31:01
+    for a swim that was 50:15 of actual swimming.
+    """
     height = HEAD_H + max(1, len(sets)) * ROW_H + FOOT_H
     date = str(header.get("start_time", ""))[:10]
     yards = round((header.get("distance_m") or 0) / 0.9144)
@@ -92,29 +112,53 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
     o.append(f'<text x="{PAD}" y="62" fill="{FG}" font-size="34" '
              f'font-weight="700">{_esc(date)}</text>')
     o.append(f'<text x="{PAD}" y="104" fill="{ACCENT}" font-size="26">'
-             f'{yards:,} yd · {dur}'
+             f'{yards:,} yd · {dur} elapsed'
              + (f' · avg {avg_hr} bpm' if avg_hr else '') + '</text>')
-    o.append(f'<text x="{PAD}" y="138" fill="{DIM}" font-size="16">'
-             f'{sum(s["n"] for s in sets)} lengths · '
-             f'{len(sets)} sets · zones from a {hr_max} bpm swim max</text>')
+
+    # The middle line has to stay short: the stroke legend occupies the right half
+    # of the header, and a longer line ran straight through it. The confident-swim
+    # figure therefore goes on the third line, which is quieter and has the room.
+    if pace:
+        o.append(f'<text x="{PAD}" y="140" fill="{FG}" font-size="19">'
+                 + _esc(f'swam {_fmt_time(pace["swim_time_s"])} · '
+                        f'rest {_fmt_time(pace["rest_s"])} '
+                        f'({pace["rest_pct"]:.0f}%) · '
+                        f'{_fmt_pace(pace["avg_pace_100_s"])} / 100 yd')
+                 + '</text>')
+
+    counts = (f'{sum(s["n"] for s in sets)} lengths · {len(sets)} sets')
+    confident = (pace or {}).get("confident")
+    if confident and confident["pct_of_yards"] < 99.5:
+        counts += (f' · swimming only {confident["yards"]:,} yd at '
+                   f'{_fmt_pace(confident["pace_100_s"])} / 100 yd')
+    counts += f' · zones from a {hr_max} bpm swim max'
+    o.append(f'<text x="{PAD}" y="172" fill="{DIM}" font-size="16">'
+             f'{_esc(counts)}</text>')
 
     # --- stroke mix, top right. The donut sits hard against the right edge and the
     # legend to its left, with a gap: an earlier layout let the legend's value
     # column run over the donut and paint it out entirely.
     pie_cx, pie_r = W - 92, 58
-    legend_x = W - 400                      # swatch
+    # Widened from W-400 when the values gained a pace: "drill/kick" on the left
+    # and "175 yd · 7% · 3:41" on the right were printing over each other.
+    legend_x = W - 520                      # swatch
     legend_gap = pie_cx - pie_r - 24        # nearest the legend may extend
     o.append(_pie(mix, pie_cx, 100, pie_r))
+    stroke_pace = {r["stroke"]: r["pace_100_s"]
+                   for r in (pace or {}).get("by_stroke", [])}
     ly = 46
     for m in mix[:6]:
         o.append(f'<rect x="{legend_x}" y="{ly - 10}" width="12" height="12" '
                  f'rx="2" fill="{m["color"]}"/>')
         o.append(f'<text x="{legend_x + 20}" y="{ly}" fill="{FG}" font-size="15">'
                  f'{_esc(STROKE_LABEL.get(m["stroke"], m["stroke"]))}</text>')
+        value = f'{m["yards"]} yd · {m["pct"]:.0f}%'
+        if m["stroke"] in stroke_pace:
+            value += f' · {_fmt_pace(stroke_pace[m["stroke"]])}'
         o.append(f'<text x="{legend_x + 118}" y="{ly}" fill="{DIM}" font-size="15" '
                  f'text-anchor="end">'
                  f'<tspan x="{legend_gap}" text-anchor="end">'
-                 f'{m["yards"]} yd · {m["pct"]:.0f}%</tspan></text>')
+                 f'{_esc(value)}</tspan></text>')
         ly += 21
 
     # --- table header
@@ -189,7 +233,8 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
                  f'{z["low"]}-{z["high"]}</text>')
         x += 118
     notes = ("speed = percentile against your own reps at that distance and "
-             "stroke · pace / 50 = time normalised to 50 yd · ★ = personal best")
+             "stroke; drill and unidentified sets are not ranked · "
+             "pace / 50 = time normalised to 50 yd · ★ = personal best")
     o.append(f'<text x="{PAD}" y="{fy + 26}" fill="{DIM}" font-size="12">'
              f'{_esc(notes)}</text>')
     o.append(f'<text x="{PAD}" y="{fy + 44}" fill="{DIM}" font-size="12">'

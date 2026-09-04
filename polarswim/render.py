@@ -46,8 +46,27 @@ ZONE_COLOR = {"Z1": "⚪", "Z2": "🔵", "Z3": "🟢", "Z4": "🟠", "Z5": "🔴
 
 
 def _fmt_clock(seconds: float) -> str:
-    m, s = divmod(int(round(seconds)), 60)
-    return f"{m}:{s:02d}"
+    """m:ss, or h:mm:ss once there is an hour to show.
+
+    A 91-minute swim used to render as `91:01`, which is not how a clock reads
+    and not what the watch says — Polar shows 1:31:01.
+
+    Seconds are truncated, not rounded, because that is what a running clock
+    does and what the watch displays: 5461.5 s is 1:31:01 on Polar, and rounding
+    made the card disagree with it by a second on every odd half-second.
+    """
+    m, s = divmod(int(seconds or 0), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _fmt_pace(seconds: float | None) -> str:
+    """A pace, in the m:ss a swimmer reads off a pace clock.
+
+    Rounded, unlike a clock: a pace is an average rather than a moment, and 116.0
+    s/100 yd is the 1:56 Polar reports, not 1:55.
+    """
+    return "—" if seconds is None else _fmt_clock(round(seconds))
 
 
 def _fmt_rep(seconds: float) -> str:
@@ -113,11 +132,25 @@ def mix_bar(df: pd.DataFrame, width: int = MIX_WIDTH) -> str:
     return "".join(STROKE_COLOR.get(k, "⬛") * n for k, n in counts.items())
 
 
-def mix_legend(df: pd.DataFrame, pool_yd: int = 25) -> list[str]:  # noqa: D401
-    """One line per stroke: colour, name, distance, share."""
-    return [f"{STROKE_COLOR.get(k, '⬛')} {STROKE_GLYPH.get(k, k).strip():<5} "
-            f"{n * pool_yd:>5} yd  {pct:>4.0f}%"
-            for k, n, pct in stroke_mix(df)]
+def mix_legend(df: pd.DataFrame, pool_yd: int = 25,
+               pace: dict | None = None) -> list[str]:  # noqa: D401
+    """One line per stroke: colour, name, distance, share, and pace.
+
+    The pace is the point of the column. A single average over a practice that
+    contained a sprint set and a drill set describes neither, and the swimmer
+    asking "how fast am I swimming breaststroke" could not answer it from any
+    screen in the app.
+    """
+    by_stroke = {r["stroke"]: r for r in (pace or {}).get("by_stroke", [])}
+    out = []
+    for k, n, pct in stroke_mix(df):
+        row = by_stroke.get(k)
+        line = (f"{STROKE_COLOR.get(k, '⬛')} {STROKE_GLYPH.get(k, k).strip():<5} "
+                f"{(row['yards'] if row else n * pool_yd):>5,} yd  {pct:>4.0f}%")
+        if row:
+            line += f"  {_fmt_pace(row['pace_100_s']):>5}"
+        out.append(line)
+    return out
 
 
 def zone_bar(zone_time: list[dict], width: int = MIX_WIDTH) -> str:
@@ -141,7 +174,7 @@ def zone_bar(zone_time: list[dict], width: int = MIX_WIDTH) -> str:
 
 
 def set_card(df: pd.DataFrame, header: dict, sets: list[dict] | None = None,
-             hr_series=None) -> str:
+             hr_series=None, pace: dict | None = None) -> str:
     """Per-set summary card.
 
     Rows are built from the same `sets_for_workout` derivation the dashboard
@@ -174,6 +207,15 @@ def set_card(df: pd.DataFrame, header: dict, sets: list[dict] | None = None,
         if effort.get("intensity") is not None:
             second += f"/int {effort['intensity']}"
     lines.append(second)
+
+    # The two numbers the watch leads with and the card did not have: how much of
+    # that elapsed clock was actually spent swimming, and the pace over it. The
+    # duration above is pool time — it counts every minute spent on the wall.
+    if pace:
+        lines.append(
+            f"   swam {_fmt_clock(pace['swim_time_s'])}"
+            f" · rest {_fmt_clock(pace['rest_s'])} ({pace['rest_pct']:.0f}%)"
+            f" · {_fmt_pace(pace['avg_pace_100_s'])} /100 yd")
 
     if sets is None:
         sets = _sets(df, header)
@@ -220,12 +262,24 @@ def strava_block(df: pd.DataFrame, header: dict,
     same reason as the pace bar — it was a shape with no scale. Everything left
     here is either a number or the key to reading one.
     """
-    parts = [set_card(df, header, sets)]
+    from . import report
+    pace = report.pace_summary(df, header)
+    parts = [set_card(df, header, sets, pace=pace)]
 
-    # Stroke colours, doubling as the distance breakdown.
-    legend = mix_legend(df)
+    # Stroke colours, doubling as the distance and pace breakdown.
+    legend = mix_legend(df, _pool_yards(header, df), pace)
     if legend:
-        parts += [""] + legend
+        parts += ["", "stroke · distance · share · pace/100"] + legend
+
+    # The swimming, with the drill and the unidentified lengths taken out. This
+    # is the number to read when the question is how well the session went: a
+    # set of single-arm drill is slow because it is drill, and leaving it in the
+    # average makes a good swim look like a bad one.
+    confident = (pace or {}).get("confident")
+    if confident and confident["pct_of_yards"] < 99.5:
+        parts += ["", f"🏅 swimming only  {confident['yards']:,} yd "
+                      f"({confident['pct_of_yards']:.0f}%)  "
+                      f"{_fmt_pace(confident['pace_100_s'])} /100 yd"]
 
     zone_time = header.get("zone_time") or []
     active = [z for z in zone_time if z.get("seconds")]
@@ -235,8 +289,8 @@ def strava_block(df: pd.DataFrame, header: dict,
             for z in active)]
     else:
         parts += ["", "  ".join(f"{c}{z}" for z, c in ZONE_COLOR.items())]
-    parts += ["speed = your own percentile at that distance",
-              "★ = personal best"]
+    parts += ["speed = your own percentile at that distance and stroke",
+              "★ = personal best · drill and unknown sets are not ranked"]
 
     parts += ["", "— polarswim"]
     return "\n".join(parts)

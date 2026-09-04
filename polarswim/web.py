@@ -96,6 +96,17 @@ let swims=[],cur=null;
 const $=s=>document.querySelector(s);
 const fmtTime=s=>s<60?`${Math.round(s)}s`
   :`${Math.floor(s/60)}:${String(Math.round(s%60)).padStart(2,'0')}`;
+// A pace or a clock always reads m:ss, and h:mm:ss once there is an hour in it —
+// a 91-minute swim was rendering as "91:01" instead of the watch's "1:31:01".
+// Truncated like a running clock, so 5461.5 s reads 1:31:01 exactly as the watch
+// shows it. A pace is an average rather than a moment, so it rounds instead.
+const fmtClock=s=>{
+  if(s==null) return '–';
+  s=Math.floor(s); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
+  return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`
+          :`${m}:${String(x).padStart(2,'0')}`;
+};
+const fmtPace=s=>s==null?'–':fmtClock(Math.round(s));
 // A set split by a stroke change yields two rows sharing a set number, so they
 // get a letter: 8a is the four 50s free, 8b the three breast.
 const setLabel=s=>s.parts>1
@@ -137,10 +148,56 @@ async function showWorkoutTab(name){
   renderAnalysis(curData);
 }
 
+// The elapsed clock counts every minute spent standing on the wall. The watch
+// leads with both figures — 1:31:01 over 50:15 — and quotes pace against the
+// second, so the dashboard has to as well or the two disagree on the same swim.
+function paceCard(p,mix){
+  if(!p||!p.by_stroke) return '';
+  // Colours come from the mix the server already sent rather than a second copy
+  // of the palette here, so a stroke cannot be two colours on one screen.
+  const hue=Object.fromEntries((mix||[]).map(m=>[m.stroke,m.color]));
+  const stat=(v,l)=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`;
+  const c=p.confident;
+  return `<div class="card">
+   <h2>time &amp; pace</h2>
+   ${stat(fmtClock(p.swim_time_s),'swimming')}
+   ${stat(fmtClock(p.rest_s),`rest (${p.rest_pct.toFixed(0)}%)`)}
+   ${stat(fmtPace(p.avg_pace_100_s),'avg / 100 yd')}
+   ${stat(fmtClock(p.elapsed_s),'elapsed')}
+   ${p.repaired_pace_100_s?`<div class="dim" style="font-size:12px;margin-bottom:12px">
+     Pace is quoted against the ${p.reported_yards.toLocaleString()} yd the watch
+     reported, so it matches Polar. Counting the repaired turns the swim was
+     ${p.yards.toLocaleString()} yd at ${fmtPace(p.repaired_pace_100_s)} / 100 yd.</div>`:''}
+   <table style="margin-top:6px"><tr><th>stroke</th><th>distance</th><th>share</th>
+     <th>pace / 100 yd</th><th>conf</th></tr>
+   ${p.by_stroke.map(r=>`<tr>
+     <td><span style="display:inline-block;width:11px;height:11px;border-radius:2px;
+       margin-right:7px;background:${hue[r.stroke]||'#6b7280'}"></span>${r.stroke}
+       ${r.named?'':'<span class="dim" title="drill, kick, or unidentified — not a stroke, and not ranked for speed"> · not a stroke</span>'}</td>
+     <td>${r.yards.toLocaleString()} yd</td><td class="dim">${r.pct.toFixed(0)}%</td>
+     <td><b>${fmtPace(r.pace_100_s)}</b></td>
+     <td class="${r.confidence<0.4?'lo':'dim'}">${r.confidence.toFixed(2)}</td></tr>`).join('')}
+   ${c?`<tr style="border-top:2px solid var(--line)">
+     <td><b>swimming only</b></td><td>${c.yards.toLocaleString()} yd</td>
+     <td class="dim">${c.pct_of_yards.toFixed(0)}%</td>
+     <td><b>${fmtPace(c.pace_100_s)}</b></td>
+     <td class="dim">best ${fmtPace(c.best_100_s)}</td></tr>`:''}
+   </table>
+   <div class="dim" style="font-size:12px;margin-top:10px">
+     <b>swimming only</b> drops drill, kick and every length the classifier could
+     not name a stroke for. A single-arm drill is slow because it is a drill, so
+     leaving it in the average makes a good swim read as a bad one. Pace is over
+     swim time, never the elapsed clock.</div>
+  </div>`;
+}
+
 function renderAnalysis(d){
   $('#main').innerHTML=subnav()+`
    <div class="card"><b>${d.header.date}</b> · ${d.header.yards.toLocaleString()} yd ·
-     ${d.header.duration} · avg ${d.header.avg_hr??'–'} bpm
+     ${d.header.duration} elapsed
+     ${d.pace?` · <b>${fmtClock(d.pace.swim_time_s)} swimming</b> ·
+       <b>${fmtPace(d.pace.avg_pace_100_s)} / 100 yd</b>`:''}
+     · avg ${d.header.avg_hr??'–'} bpm
      ${d.repairs?`<span class="lo"> · ${d.repairs} turn-detection defect(s) repaired</span>`:''}
      ${d.im_rounds?`<span class="dim"> · ${d.im_rounds} medley round(s)</span>`:''}
      ${d.effort?`<div style="margin-top:10px">
@@ -149,6 +206,7 @@ function renderAnalysis(d){
        ${d.effort.intensity!=null?`<span class="chip"
          style="background:${d.effort.intensity_color}">${d.effort.intensity}</span>
        <span class="dim">intensity (of 100)</span>`:''}</div>`:''}</div>
+   ${paceCard(d.pace,d.mix)}
    <div class="card" style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">
      <svg id="pie" width="150" height="150" viewBox="0 0 150 150"></svg>
      <div id="legend" style="font-size:13px"></div></div>
@@ -500,9 +558,29 @@ def create_app(db_url=None) -> Flask:
             _ref_cache["n"] = n
         return _ref_cache["ref"]
 
+    def _mix(df, pace):
+        """Stroke mix rows for the pie and the legend.
+
+        Distance comes from the pace summary, which counts repaired lengths, so
+        the pie legend and the pace table cannot show two different figures for
+        the same stroke — they were showing freestyle as 1,450 yd and 1,475 yd on
+        one screen. Ordered biggest share first, which is what a pie wants.
+        """
+        rows = (pace or {}).get("by_stroke")
+        if not rows:
+            return [{"stroke": k, "lengths": n, "pct": pct, "yards": n * 25,
+                     "color": PIE_COLORS.get(k, "#6b7280")}
+                    for k, n, pct in render.stroke_mix(df)]
+        return [{"stroke": r["stroke"], "lengths": r["lengths"], "pct": r["pct"],
+                 "yards": r["yards"], "color": PIE_COLORS.get(r["stroke"], "#6b7280")}
+                for r in sorted(rows, key=lambda r: -r["yards"])]
+
     def _fmt(sec):
+        """m:ss, or h:mm:ss once there is an hour — a 91-minute swim was showing
+        as `91:01` rather than the `1:31:01` on the watch."""
         m, s = divmod(int(sec or 0), 60)
-        return f"{m}:{s:02d}"
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
     @app.get("/")
     def index():
@@ -531,6 +609,7 @@ def create_app(db_url=None) -> Flask:
         ref = _reference()
         sets = report.sets_for_workout(df, repairs, ref)
         head.update(report.card_extras(engine, wid, df, ref))
+        pace = report.pace_summary(df, head)
         return jsonify(
             hr_max=ref.hr_max,
             zones=ref.zone_bounds(),
@@ -538,10 +617,9 @@ def create_app(db_url=None) -> Flask:
             header={"date": head["start_time"][:16],
                     "yards": round((head["distance_m"] or 0) / 0.9144),
                     "duration": _fmt(head["duration_s"]), "avg_hr": head["avg_hr"]},
+            pace=pace,
             sets=sets,
-            mix=[{"stroke": k, "lengths": n, "pct": pct, "yards": n * 25,
-                  "color": PIE_COLORS.get(k, "#6b7280")}
-                 for k, n, pct in render.stroke_mix(df)],
+            mix=_mix(df, pace),
             paces=[float(x) for x in df.sort_values("idx")["pace_s"]],
             repairs=len(res.repairs),
             im_rounds=len(res.im_rounds),
@@ -556,11 +634,10 @@ def create_app(db_url=None) -> Flask:
         ref = _reference()
         sets = report.sets_for_workout(
             df, {(r.workout_id, r.idx) for r in res.repairs}, ref)
-        mix = [{"stroke": k, "pct": pct, "yards": n * 25,
-                "color": PIE_COLORS.get(k, "#6b7280")}
-               for k, n, pct in render.stroke_mix(df)]
-        svg = image.workout_svg(_header(wid), sets, mix, ref.zone_bounds(),
-                                ref.hr_max, df)
+        head = _header(wid)
+        pace = report.pace_summary(df, head)
+        svg = image.workout_svg(head, sets, _mix(df, pace), ref.zone_bounds(),
+                                ref.hr_max, df, pace)
         return Response(svg, mimetype="image/svg+xml")
 
     @app.get("/api/review/<int:wid>")

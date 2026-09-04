@@ -214,3 +214,26 @@ class TestNamedStrokesAreDefinedOnce:
         assert (set(analyze.NAMED_STROKES) | set(analyze.UNNAMED_STROKES)
                 == set(analyze.CLASSES))
         assert not set(analyze.NAMED_STROKES) & set(analyze.UNNAMED_STROKES)
+
+
+class TestOneDistancePerStroke:
+    """The pie legend counted sensor records and the pace table counted repaired
+    lengths, so one screen showed freestyle as both 1,450 yd and 1,475 yd."""
+
+    def test_the_mix_and_the_pace_table_agree(self):
+        from polarswim.web import create_app
+        import pathlib
+        sample = str(pathlib.Path(__file__).resolve().parents[1] / "sample" / "sample.db")
+        client = create_app(sample).test_client()
+        from polarswim import db as _db, report as _report
+        wid = int(_report.workout_headers(_db.connect(sample))["id"].iloc[0])
+        d = client.get(f"/api/workout/{wid}").get_json()
+        by_stroke = {r["stroke"]: r["yards"] for r in d["pace"]["by_stroke"]}
+        for slice_ in d["mix"]:
+            assert slice_["yards"] == by_stroke[slice_["stroke"]]
+
+    def test_the_shares_still_close_the_circle(self):
+        df = _lengths([(30.0, "freestyle")] * 3 + [(40.0, "other")] * 3
+                      + [(35.0, "backstroke")])
+        out = report.pace_summary(df, {"duration_s": 600.0, "distance_m": 160.02})
+        assert sum(r["pct"] for r in out["by_stroke"]) == pytest.approx(100.0)

@@ -247,7 +247,9 @@ def pace_summary(df: pd.DataFrame, header: dict | None = None) -> dict:
     for stroke, g in d.groupby("predicted"):
         row = block(g)
         row["stroke"] = str(stroke)
-        row["pct"] = round(100 * row["yards"] / total_yd, 1) if total_yd else 0.0
+        # Left unrounded: the dashboard draws these as pie arcs, and six shares
+        # each rounded to a tenth do not add up to a circle. Display rounds them.
+        row["pct"] = 100 * row["yards"] / total_yd if total_yd else 0.0
         row["confidence"] = round(float(g["confidence"].mean()), 2)
         row["named"] = str(stroke) in analyze.NAMED_STROKES
         by_stroke.append(row)
