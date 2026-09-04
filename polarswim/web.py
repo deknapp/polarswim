@@ -226,8 +226,12 @@ function renderAnalysis(d){
            :'<span class="dim">–</span>'}</td>
        <td>${s.speed?`<span class="pctbar"><i style="width:${s.speed.percentile}%;
            background:${s.speed.color}"></i></span>
-           <span class="dim">${s.speed.percentile}%</span>`
-           :'<span class="dim">–</span>'}</td>
+           <span class="dim" title="vs ${s.speed.n} of your own ${s.speed.stroke||''} ${s.speed.distance}s">${s.speed.percentile}%</span>
+           ${s.speed.edge?`<span class="lo" title="At the edge of the range this
+             stroke label spans. The labels are inferred from pace, so a rep past
+             the end of its own label reads 0% or 100% for a reason that is about
+             the label rather than the swim.">*</span>`:''}`
+           :'<span class="dim" title="no comparable history at this distance and stroke, or not a stroke">–</span>'}</td>
        <td>${s.pace_50_s.toFixed(0)}s</td>
        <td>${s.rest_before_s.toFixed(0)}s</td>
        <td>${s.pr?'<span class="pr" title="fastest recorded at this distance and stroke">★ PR</span>':''}</td></tr>`).join('')}
@@ -238,8 +242,14 @@ function renderAnalysis(d){
      ${d.zones.map(z=>`<span class="chip" style="background:${z.color}">${z.zone}</span>
        <span style="margin-right:14px">${z.label} ${z.low}–${z.high}</span>`).join('')}
      <div class="dim" style="margin-top:10px">speed — percentile against your own reps
-       of the same distance; higher is faster. ★ PR marks your fastest recorded time at
-       that distance and stroke (stroke is inferred, so treat it as provisional).</div>
+       of the same distance <em>and stroke</em>; higher is faster. A dash means fewer
+       than 15 comparable reps, or a set that is not a stroke: drill, kick and
+       unidentified lengths are not ranked, since a drill is slow because it is a
+       drill. A <span class="lo">*</span> marks a rep at the edge of the pace range
+       its own label spans — the labels are inferred <em>from pace</em>, so those
+       read 0% or 100% for a reason that is about the label, not the swim.
+       ★ PR marks your fastest recorded time at that distance and stroke (stroke is
+       inferred, so treat it as provisional).</div>
    </div>
    <div class="card"><button onclick="copyCard()">copy Strava card</button>
      <button onclick="downloadImage()">download image for Strava</button>
@@ -268,7 +278,8 @@ function drawPie(mix){
   $('#legend').innerHTML=mix.map(m=>
     `<div style="margin:3px 0"><span style="display:inline-block;width:11px;height:11px;
      background:${m.color};border-radius:2px;margin-right:7px"></span>
-     ${m.stroke} <span class="dim">${m.yards} yd · ${m.pct.toFixed(0)}%</span></div>`).join('');
+     ${m.stroke} <span class="dim">${m.yards.toLocaleString()} yd ·
+     ${m.pct.toFixed(0)}%</span></div>`).join('');
 }
 function drawSpark(p){
   const el=$('#spark'); if(!el||!p.length)return;
