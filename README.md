@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 363 tests, no network
+.venv/bin/pytest -q                                # 367 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH

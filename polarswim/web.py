@@ -11,6 +11,7 @@ presentation layer over the same derivations the CLI uses.
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 from flask import Flask, Response, jsonify, request
 
@@ -92,6 +93,7 @@ PAGE = """<!doctype html>
 </header>
 <div class="wrap"><aside id="list"></aside><main id="main"></main></div>
 <script>
+__PALETTE__
 let swims=[],cur=null;
 const $=s=>document.querySelector(s);
 const fmtTime=s=>s<60?`${Math.round(s)}s`
@@ -166,7 +168,7 @@ function paceCard(p,mix){
    ${stat(fmtClock(p.elapsed_s),'elapsed')}
    ${p.repaired_pace_100_s?`<div class="dim" style="font-size:12px;margin-bottom:12px">
      Pace is quoted against the ${p.reported_yards.toLocaleString()} yd the watch
-     reported, so it matches Polar. Counting the repaired turns the swim was
+     reported, so it matches Polar. Counting repaired turns:
      ${p.yards.toLocaleString()} yd at ${fmtPace(p.repaired_pace_100_s)} / 100 yd.</div>`:''}
    <table style="margin-top:6px"><tr><th>stroke</th><th>distance</th><th>share</th>
      <th>pace / 100 yd</th><th>conf</th></tr>
@@ -324,9 +326,12 @@ async function loadSummary(){
   $('#main').innerHTML=`
    <div class="card">
      ${stat(d.workouts,'swims')}${stat(d.yards.toLocaleString(),'yards')}
+     ${stat(d.swim_hours!=null?d.swim_hours+'h':d.hours+'h','swimming')}
      ${stat(d.hours+'h','pool time')}${stat(d.lengths.toLocaleString(),'lengths')}
      ${stat(d.weeks,'weeks')}
    </div>
+   ${paceCard(d.pace,(d.pace&&d.pace.by_stroke||[]).map(r=>
+      ({stroke:r.stroke,color:PIE_JS[r.stroke]||'#6b7280'})))}
    <div class="card"><h2>heart rate</h2>
      ${stat(d.hr_max,'max observed')}${stat(d.hr_p95,'95th percentile')}
      ${stat(d.hr_mean,'mean')}${stat(d.hr_samples.toLocaleString(),'samples')}
@@ -349,7 +354,8 @@ async function loadSummary(){
    <div class="card"><h2>stroke mix (inferred)</h2>
      ${Object.entries(d.stroke_mix_pct).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
        `<div class="zrow"><span style="width:120px">${k}</span>
-        <span class="ztrack"><i style="width:${v}%;background:var(--accent)"></i></span>
+        <span class="ztrack"><i style="width:${v}%;
+          background:${PIE_JS[k]||'var(--accent)'}"></i></span>
         <span style="width:60px" class="dim">${v}%</span></div>`).join('')}
      <div class="dim" style="font-size:12px;margin-top:10px">
        ${d.implausible_reps} reps excluded from personal bests as turn-detection
@@ -542,6 +548,12 @@ boot();
 </script></body></html>"""
 
 
+# The page needs the same stroke palette the API sends. Injected from the one
+# dict above rather than kept as a second copy in the script, so a stroke cannot
+# come out blue on the workout tab and grey on the summary tab.
+PAGE = PAGE.replace("__PALETTE__", "const PIE_JS=" + json.dumps(PIE_COLORS) + ";")
+
+
 def create_app(db_url=None) -> Flask:
     app = Flask(__name__)
     engine = db.connect(db_url)
@@ -647,8 +659,10 @@ def create_app(db_url=None) -> Flask:
             return jsonify(error="not found"), 404
         res = analyze.analyze(engine, workout_id=wid, persist=False)
         sets = report.sets_for_workout(df, {(r.workout_id, r.idx) for r in res.repairs})
+        head = _header(wid)
         try:
-            out = ai.review(_header(wid), sets, res.params)
+            out = ai.review(head, sets, res.params,
+                            pace=report.pace_summary(df, head))
             return jsonify(text=out.text, model=out.model)
         except ai.AIError as e:
             return jsonify(text=f"AI review unavailable: {e}", model="error")

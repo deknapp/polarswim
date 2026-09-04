@@ -237,3 +237,35 @@ class TestOneDistancePerStroke:
                       + [(35.0, "backstroke")])
         out = report.pace_summary(df, {"duration_s": 600.0, "distance_m": 160.02})
         assert sum(r["pct"] for r in out["by_stroke"]) == pytest.approx(100.0)
+
+
+class TestTheBestLengthIsNotASensorDefect:
+    """A spurious wall needs a matching PAIR to be recognised as a split; an
+    unmatched one survives as a single impossibly fast record, and reporting it
+    gave a lifetime "best length" of 0:34 / 100 yd — 8.5 s for 25 yards."""
+
+    def test_an_impossible_length_is_not_a_best(self):
+        df = _lengths([(30.0, "freestyle")] * 7 + [(8.5, "freestyle")])
+        out = report.pace_summary(df, {"duration_s": 600.0, "distance_m": 182.88,
+                                       "median_pace_s": 30.0})
+        assert out["confident"]["best_100_s"] == 120.0
+
+    def test_a_genuine_sprint_survives(self):
+        df = _lengths([(30.0, "freestyle")] * 7 + [(21.0, "freestyle")])
+        out = report.pace_summary(df, {"duration_s": 600.0, "distance_m": 182.88,
+                                       "median_pace_s": 30.0})
+        assert out["confident"]["best_100_s"] == 84.0
+
+    def test_the_floor_follows_the_swimmer_not_the_session(self):
+        """65% of a drill-heavy session's own median threw out a real sprint from
+        the same practice, so the reference is the whole history's median."""
+        drill_heavy = _lengths([(60.0, "other")] * 8 + [(25.0, "freestyle")])
+        out = report.pace_summary(drill_heavy, {"duration_s": 900.0,
+                                                "distance_m": 205.74,
+                                                "median_pace_s": 26.0})
+        assert out["confident"]["best_100_s"] == 100.0
+
+    def test_without_a_reference_it_falls_back_to_the_frame(self):
+        df = _lengths([(30.0, "freestyle")] * 7 + [(8.5, "freestyle")])
+        out = report.pace_summary(df, {"duration_s": 600.0, "distance_m": 182.88})
+        assert out["confident"]["best_100_s"] == 120.0

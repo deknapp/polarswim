@@ -223,6 +223,11 @@ def pace_summary(df: pd.DataFrame, header: dict | None = None) -> dict:
     if df is None or df.empty:
         return {}
 
+    # The artifact floor belongs to the swimmer, not to one practice. `card_extras`
+    # puts it on the header because it holds the reference; a caller without one
+    # falls back to this frame, which is right when the frame IS the history.
+    median_pace_s = float(header.get("median_pace_s") or df["pace_s"].median())
+
     d = df.copy()
     if "length_factor" not in d.columns:
         d["length_factor"] = 1.0
@@ -264,11 +269,7 @@ def pace_summary(df: pd.DataFrame, header: dict | None = None) -> dict:
         confident["pct_of_yards"] = (round(100 * confident["yards"] / total_yd, 1)
                                      if total_yd else 0.0)
         confident["strokes"] = sorted(named["predicted"].unique().tolist())
-        # The best single length, on the repaired pace, so a length the sensor
-        # split in two cannot supply an impossible best.
-        best = named["pace_s"].min()
-        confident["best_100_s"] = (round(float(best) * PACE_YARDS / 25.0, 1)
-                                   if pd.notna(best) else None)
+        confident["best_100_s"] = _best_length_pace(named, median_pace_s)
 
     repaired_pace = (round(swim_s / (total_yd / PACE_YARDS), 1)
                      if total_yd else None)
@@ -291,6 +292,30 @@ def pace_summary(df: pd.DataFrame, header: dict | None = None) -> dict:
         "by_stroke": by_stroke,
         "confident": confident,
     }
+
+
+def _best_length_pace(named: pd.DataFrame, median_pace_s: float) -> float | None:
+    """The fastest length, per 100 yd, with sensor artifacts excluded.
+
+    The pace is already repaired, but only where a split was actually detected —
+    a spurious wall needs a matching PAIR to be recognised, and an unmatched one
+    survives as a single impossibly fast record. Reporting it as a best is the
+    exact failure `metrics.PLAUSIBLE_FLOOR_RATIO` exists to prevent: across this
+    history it produced a 0:34 /100 yd "best length", which is 8.5 s for 25 yd.
+    Matching what the watch reports is not worth quoting a time nobody swam, and
+    Polar does not filter these.
+
+    The floor is a fraction of the swimmer's whole-history median, not of the one
+    workout's. A drill-heavy session has a slow median, and taking 65% of THAT
+    threw out a genuine 16.8 s sprint from the same practice.
+    """
+    from .metrics import PLAUSIBLE_FLOOR_RATIO
+
+    plausible = named["pace_s"][
+        named["pace_s"] >= median_pace_s * PLAUSIBLE_FLOOR_RATIO]
+    if plausible.empty:
+        return None
+    return round(float(plausible.min()) * PACE_YARDS / 25.0, 1)
 
 
 def _absolute_hr(g: pd.DataFrame) -> float:
@@ -380,10 +405,21 @@ def overall_summary(engine: Engine, ref) -> dict:
     mix = (lengths_df["predicted"].value_counts(normalize=True) * 100).round(1)
     dates = pd.to_datetime(heads["start_time"])
 
+    # The same question the workout page answers, asked of the whole history: how
+    # much of all those hours was swimming, and how fast was each stroke. `hours`
+    # below is pool time and always was — it counts every minute spent on a wall.
+    pace = pace_summary(lengths_df, {
+        "duration_s": float(heads["duration_s"].sum()),
+        "distance_m": float(heads["distance_m"].sum()),
+        "median_pace_s": ref.median_pace_s,
+    })
+
     return {
         "workouts": int(len(heads)),
         "yards": int(round(heads["distance_m"].sum() / 0.9144)),
         "hours": round(float(heads["duration_s"].sum()) / 3600, 1),
+        "swim_hours": round(pace["swim_time_s"] / 3600, 1) if pace else None,
+        "pace": pace,
         "lengths": int(len(lengths_df)),
         "first": str(heads["start_time"].min())[:10],
         "last": str(heads["start_time"].max())[:10],
@@ -483,7 +519,10 @@ def card_extras(engine, workout_id: int, df, ref=None) -> dict:
            for s in sets if s.get("pr")]
 
     return {"effort": ref.effort_score(workout_id), "zone_time": zone_time,
-            "prs": prs}
+            "prs": prs,
+            # So `pace_summary` can screen sensor artifacts against the swimmer's
+            # own history rather than against this one workout.
+            "median_pace_s": ref.median_pace_s}
 
 def format_season(summary: dict) -> str:
     """Terminal-friendly rendering of `season_summary`."""

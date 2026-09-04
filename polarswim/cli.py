@@ -211,7 +211,8 @@ def cmd_review(args) -> int:
 
     if not ai.available():
         print("(no ANTHROPIC_API_KEY found — offline summary)\n")
-    out = ai.review(header, sets, res.params)
+    out = ai.review(header, sets, res.params,
+                    pace=report.pace_summary(df, header))
     print(out.text)
     if out.output_tokens:
         print(f"\n[{out.model}: {out.input_tokens:,} in / {out.output_tokens:,} out]")

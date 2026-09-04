@@ -84,7 +84,8 @@ def available() -> bool:
     return _load_env_key() is not None
 
 
-def build_prompt(header: dict, sets: list[dict], params: dict) -> str:
+def build_prompt(header: dict, sets: list[dict], params: dict,
+                 pace: dict | None = None) -> str:
     """Render the derived facts the model reasons over."""
     lines = [
         f"Date: {str(header.get('start_time'))[:16]}",
@@ -92,6 +93,26 @@ def build_prompt(header: dict, sets: list[dict], params: dict) -> str:
         f"   Duration: {round((header.get('duration_s') or 0) / 60)} min"
         f"   Avg HR: {header.get('avg_hr')}   Max HR: {header.get('max_hr')}",
         f"Pool: {header.get('pool_length_m')} m",
+    ]
+    # Without this the model reads the elapsed clock as the swim and reviews a
+    # 91-minute session that was 50 minutes of swimming and 41 minutes of rest.
+    if pace:
+        lines.append(
+            f"Swim time: {pace['swim_time_s'] / 60:.0f} min of that "
+            f"{pace['elapsed_s'] / 60:.0f} min elapsed "
+            f"({pace['rest_pct']:.0f}% rest)"
+            f"   Average pace: {pace['avg_pace_100_s']:.0f} s /100 yd")
+        lines.append("Pace by inferred stroke (s /100 yd): " + ", ".join(
+            f"{r['stroke']} {r['pace_100_s']:.0f} ({r['yards']} yd)"
+            for r in pace["by_stroke"] if r["pace_100_s"]))
+        confident = pace.get("confident")
+        if confident:
+            lines.append(
+                f"Excluding drill, kick and unidentified lengths: "
+                f"{confident['yards']} yd at {confident['pace_100_s']:.0f} "
+                f"s /100 yd. This is the swimming; the overall average above "
+                f"includes drill sets that are slow on purpose.")
+    lines += [
         "",
         "Sets (pace is seconds per 25 yd; hr_cost is bpm above this swimmer's baseline):",
         f"{'set':>4} {'n':>3} {'stroke':<13} {'conf':>5} {'pace':>6} {'hr_cost':>8} {'rest_before':>12} {'note':<10}",
@@ -132,7 +153,7 @@ def review_offline(header: dict, sets: list[dict], params: dict) -> Review:
 
 
 def review(header: dict, sets: list[dict], params: dict,
-           model: str = MODEL) -> Review:
+           model: str = MODEL, pace: dict | None = None) -> Review:
     """Ask Claude to review the session. Falls back offline without a key."""
     key = _load_env_key()
     if not key:
@@ -145,7 +166,7 @@ def review(header: dict, sets: list[dict], params: dict,
                       "pip install anthropic") from e
 
     client = anthropic.Anthropic(api_key=key, timeout=180.0)
-    prompt = build_prompt(header, sets, params)
+    prompt = build_prompt(header, sets, params, pace)
 
     # Streaming because adaptive thinking plus a long system prompt can otherwise
     # push a single request past the HTTP timeout.
