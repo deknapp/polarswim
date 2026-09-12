@@ -31,7 +31,8 @@ PR_GOLD = "#f0a848"
 
 STROKE_LABEL = {
     "freestyle": "free", "backstroke": "back", "breaststroke": "breast",
-    "butterfly": "fly", "other": "drill/kick", "undetermined": "unknown",
+    "butterfly": "fly", "kick": "kick", "drill": "drill",
+    "other": "drill/kick", "undetermined": "unknown",
     "IM": "IM",
 }
 

@@ -57,19 +57,43 @@ REFERENCE_LENGTH_M = 22.86          # 25 yards; the unit all pace is normalized 
 REST_GAP_S = 2.0
 HR_LAG_S = 15                       # cardiac response lag when attributing HR
 CLASSES = ("freestyle", "backstroke", "breaststroke", "butterfly",
-           "other", "undetermined")
+           "kick", "drill", "other", "undetermined")
 
-# Two of those six are not strokes. `other` is drill and kick — a length swum on
-# purpose, but not swum as a stroke — and `undetermined` is the classifier saying
-# it could not tell. Neither belongs in a number that answers "how well did I
-# swim", and neither can be ranked for speed: a single-arm drill is slow because
-# it is a drill, so putting it on the same pace scale as a freestyle 50 makes the
-# drill look terrible and the ranking meaningless.
+# Kick and drill are both "slow on purpose", and they are not the same thing —
+# one trains the legs and the other trains the catch — so reporting 500 yards of
+# `other` answers neither "how much did I kick" nor "how much technique work did
+# I do". What separates them is HOW slow, and the separation is physiological
+# rather than arbitrary: take the arms away and a swimmer holds roughly 55-70% of
+# their swimming speed, so a kick set lands around 1.4-1.8 times their swimming
+# pace. A drill keeps the arms, loses only the efficiency, and lands nearer
+# 1.15-1.35.
+#
+# Expressed as a ratio to the swimmer's OWN freestyle pace on the day, which is
+# the only form that transfers: this swimmer's free pace runs from 17 to 25 s per
+# 25 yd across the history, so no absolute threshold could hold.
+#
+# The boundary at 1.45 is the one genuinely arbitrary number here, sitting in the
+# gap between the two ranges. It is applied only WITHIN work already identified
+# as not-a-stroke, so it renames rather than reclassifies, and a wrong call costs
+# a label rather than a stroke. Below 1.18 the set is barely slow at all and gets
+# no name: a drill and an easy freestyle length are indistinguishable there, and
+# 266 lengths of this history sit in that band — 157 of them currently read as
+# freestyle, which is what the swimmer's own corrections are for.
+KICK_PACE_RATIO = 1.45
+DRILL_PACE_RATIO = 1.18
+
+# Four of those eight are not strokes. `kick` and `drill` are lengths swum on
+# purpose but not swum as a stroke, `other` is the same thing where the two
+# cannot be told apart, and `undetermined` is the classifier saying it could not
+# tell at all. None belongs in a number that answers "how well did I swim", and
+# none can be ranked for speed: a single-arm drill is slow because it is a drill,
+# so putting it on the same pace scale as a freestyle 50 makes the drill look
+# terrible and the ranking meaningless.
 #
 # So the two lists are named once, here, and every summary that means "the
 # swimming" filters on NAMED_STROKES rather than re-deciding what counts.
 NAMED_STROKES = ("freestyle", "backstroke", "breaststroke", "butterfly")
-UNNAMED_STROKES = ("other", "undetermined")
+UNNAMED_STROKES = ("kick", "drill", "other", "undetermined")
 
 
 @dataclass
@@ -318,6 +342,18 @@ def _set_stats(df: pd.DataFrame) -> pd.DataFrame:
     Recomputed after any repair, since a corrected pace changes every one of them.
     """
     df = df.copy()
+
+    # How slow a set is only means something against the day it was swum. This
+    # swimmer's freestyle pace runs from 17 to 25 s per 25 yd over the history, so
+    # the same 36 s length is a kick on one day and nothing unusual on another.
+    # The 15th percentile of the workout's own lengths stands in for its freestyle
+    # pace — freestyle is the fastest thing in the practice and much the most of
+    # it — and the 15th rather than the minimum because the minimum here is
+    # routinely a missed wall, which would drag the reference impossibly fast.
+    free = df.groupby("workout_id")["pace_s"].transform(
+        lambda s: s.quantile(0.15))
+    df["free_ref_s"] = free.where(free > 0)
+
     grp = df.groupby(["workout_id", "set_id"])["pace_s"]
     df["set_median_pace_s"] = grp.transform("median")
     df["set_size"] = df.groupby(["workout_id", "set_id"])["idx"].transform("size")
@@ -337,6 +373,7 @@ def _set_stats(df: pd.DataFrame) -> pd.DataFrame:
     df = df.drop(columns=["set_rest_s"], errors="ignore")
     df = df.merge(set_rest, on=["workout_id", "set_id"], how="left")
     df["set_rest_s"] = df["set_rest_s"].fillna(0.0)
+    df["set_pace_ratio"] = df["set_median_pace_s"] / df["free_ref_s"]
     return df
 
 
@@ -359,6 +396,19 @@ def learn_params(df: pd.DataFrame) -> dict[str, dict[str, float]]:
     # length would weight long sets out of proportion.
     sets = (df.drop_duplicates(["workout_id", "set_id"])["set_rest_s"].dropna()
             if "set_rest_s" in df.columns else pd.Series(dtype=float))
+    # Percentiles of the SUPPORT work specifically, so a kick set can be placed
+    # against other kick sets rather than against the practice as a whole. Read
+    # off the pace ratio rather than off the classifier's output, because this
+    # runs before the classifier: everything at or past the kick ratio is support
+    # work by definition of that threshold, which is enough to describe the
+    # population without needing to know which is kick and which is drill.
+    support = (df[df["set_pace_ratio"] >= KICK_PACE_RATIO]
+               if "set_pace_ratio" in df.columns else df.iloc[0:0])
+    support_cost = support["hr_cost"].dropna() if len(support) else pd.Series(dtype=float)
+    support_sets = (support.drop_duplicates(["workout_id", "set_id"])["set_rest_s"]
+                    .dropna() if len(support) and "set_rest_s" in support.columns
+                    else pd.Series(dtype=float))
+
     return {
         "_global": {
             "pace_p10": float(pace.quantile(0.10)),
@@ -370,9 +420,59 @@ def learn_params(df: pd.DataFrame) -> dict[str, dict[str, float]]:
             "cost_p67": float(cost.quantile(0.67)) if len(cost) else 0.0,
             "rest_p50": float(sets.quantile(0.50)) if len(sets) else 0.0,
             "rest_p80": float(sets.quantile(0.80)) if len(sets) else 0.0,
+            "kick_cost_p67": (float(support_cost.quantile(0.67))
+                              if len(support_cost) else 0.0),
+            "kick_rest_p50": (float(support_sets.quantile(0.50))
+                              if len(support_sets) else 0.0),
             "n_obs": float(len(pace)),
         }
     }
+
+
+def support_class(pace_ratio: float) -> str:
+    """Name work already known not to be a stroke: kick, drill, or neither.
+
+    Only the ratio is consulted. Heart rate cannot help here — across this
+    history HR cost FALLS as the work gets slower (22 bpm above baseline at 1.2x
+    freestyle pace, 14 at 1.65x), because the slow work in it is aerobic kick and
+    technique rather than the brutal kick sets the cost axis would separate. Rest
+    cannot help either: both are taken on short rest, which is how they were
+    identified as support work in the first place.
+    """
+    if not np.isfinite(pace_ratio) or pace_ratio <= 0:
+        return "other"
+    if pace_ratio >= KICK_PACE_RATIO:
+        return "kick"
+    if pace_ratio >= DRILL_PACE_RATIO:
+        return "drill"
+    return "other"
+
+
+def support_effort(hr_cost: float, rest: float,
+                   params: dict[str, dict[str, float]]) -> str | None:
+    """How hard a kick or drill set was, against this swimmer's own support work.
+
+    Not a stroke and not offered as one. Which stroke's kick a set was cannot be
+    recovered from this data — the history holds no medley-order kick to read an
+    order off, and the one other structural route, a kick rep sitting beside the
+    stroke it belongs to, turned out to be contaminated: 46 of 290 support reps
+    have a same-distance stroke neighbour and nearly all of those neighbours are
+    breaststroke 25s, which is the classifier flipping between two labels that
+    overlap in pace rather than a swimmer alternating kick and swim.
+
+    What the data does support is how hard the set was, and the two signals agree
+    with each other: across this swimmer's kick sets, heart-rate cost rises with
+    the rest taken (r = 0.25) and falls as the set gets slower (r = -0.32). An
+    expensive kick set on long rest is a kick set being worked; a cheap one on
+    short rest is aerobic. Both thresholds are this swimmer's own percentiles.
+    """
+    g = params.get("_global", {})
+    c67, r50 = g.get("kick_cost_p67", 0.0), g.get("kick_rest_p50", 0.0)
+    if not c67 or not np.isfinite(hr_cost):
+        return None
+    if hr_cost >= c67 and (not r50 or rest >= r50):
+        return "effort"
+    return "aerobic"
 
 
 def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFrame:
@@ -400,11 +500,12 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
     # stroke is only called on positive evidence; where the evidence is weak the
     # answer is `undetermined` rather than a coin flip dressed up as a result.
 
-    out, conf = [], []
+    out, conf, effort = [], [], []
     for r in df.itertuples():
         pace, cost, cv = r.pace_s, r.hr_cost, r.set_cv
         rest = getattr(r, "set_rest_s", 0.0)
         size = getattr(r, "set_size", 0)
+        support = support_class(getattr(r, "set_pace_ratio", float("nan")))
         long_rest = have_rest and rest >= r80
         # A set of one or two lengths has no usable median or spread, so every
         # rule below that reads a set statistic is reading noise. Say so in the
@@ -414,13 +515,17 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
         def call(name: str, c: float) -> None:
             out.append(name)
             conf.append(round(c * trust, 3))
+            # Only support work gets a character; a butterfly set is described by
+            # being butterfly, not by how hard it was for a kick set.
+            effort.append(support_effort(cost, rest, params)
+                          if name in ("kick", "drill") else None)
 
         # Drill and kick: a set that is uniformly slow, cheap, and taken on short
         # rest. The rest condition matters — a uniformly slow set that bought long
         # rest is a hard stroke set, not drill, and the old rule called it drill.
         if (size >= 4 and r.set_median_pace_s >= p90 and cv < 0.18
                 and not long_rest):
-            call("other", 0.74); continue
+            call(support, 0.74); continue
 
         # The dominant fast mode is freestyle.
         if pace <= p30:
@@ -440,7 +545,7 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
             if np.isnan(cost):
                 # No heart rate. Rest alone cannot name a stroke, but a slow set
                 # on short rest is far more likely aerobic work than a race stroke.
-                call("other" if have_rest and rest <= r50 else "undetermined", 0.30)
+                call(support if have_rest and rest <= r50 else "undetermined", 0.30)
                 continue
             if cost >= c67:
                 # Slow and expensive: working hard without travelling. Backstroke
@@ -456,11 +561,12 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
 
         # Slower than anything else in the history. Drill, kick, or recovery —
         # unless it bought long rest, in which case it was hard, not easy.
-        call("undetermined" if long_rest else "other", 0.45)
+        call("undetermined" if long_rest else support, 0.45)
 
     df = df.copy()
     df["predicted"] = out
     df["confidence"] = conf
+    df["effort"] = effort
     return df
 
 

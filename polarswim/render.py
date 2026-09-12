@@ -25,16 +25,22 @@ BAR = "▇"
 
 STROKE_GLYPH = {
     "freestyle": "free", "backstroke": "back", "breaststroke": "brst",
-    "butterfly": "fly ", "other": "drll", "undetermined": "  ? ", "IM": "IM  ",
+    "butterfly": "fly ", "kick": "kick", "drill": "drll", "other": "othr",
+    "undetermined": "  ? ", "IM": "IM  ",
 }
 
 # Strava descriptions are plain text — no markdown, no HTML, no ANSI colour. Emoji
 # are the only characters that render in colour, so the palette is built from the
 # coloured-square set. These are also double-width in most renderers, which is why
 # exactly one appears per line: a uniform shift preserves the column alignment.
+# Nine classes, nine squares, which is every coloured square there is. `other`
+# takes the red one: it is support work whose kind could not be named even as
+# kick or drill, it is rare (0.4% of this history), and it is the one label a
+# correction would most improve — so it should be the one that catches the eye.
 STROKE_COLOR = {
     "freestyle": "🟦", "backstroke": "🟩", "breaststroke": "🟧",
-    "butterfly": "🟪", "other": "⬜", "undetermined": "⬛", "IM": "🟨",
+    "butterfly": "🟪", "kick": "🟫", "drill": "⬜", "other": "🟥",
+    "undetermined": "⬛", "IM": "🟨",
 }
 MIX_WIDTH = 12          # squares in the stacked bar; 12 keeps it inside a phone
 

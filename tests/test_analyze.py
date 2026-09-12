@@ -484,3 +484,77 @@ class TestOneStrokePerUnbrokenSwim:
     def test_a_clear_majority_still_absorbs_its_strays(self):
         df = self._rep(["freestyle"] * 19 + ["butterfly"] * 3)
         assert set(analyze.enforce_rep_consistency(df)["predicted"]) == {"freestyle"}
+
+
+class TestSupportWork:
+    """Kick and drill are both slow on purpose, and they are not the same thing."""
+
+    def test_kick_is_much_slower_than_swimming(self):
+        """Taking the arms away costs 30-45% of a swimmer's speed."""
+        assert analyze.support_class(1.6) == "kick"
+        assert analyze.support_class(analyze.KICK_PACE_RATIO) == "kick"
+
+    def test_drill_keeps_the_arms_and_only_loses_efficiency(self):
+        assert analyze.support_class(1.25) == "drill"
+        assert analyze.support_class(analyze.DRILL_PACE_RATIO) == "drill"
+
+    def test_barely_slow_work_is_not_named(self):
+        """A drill and an easy freestyle length are indistinguishable here, so
+        neither is claimed."""
+        assert analyze.support_class(1.05) == "other"
+
+    def test_a_missing_ratio_names_nothing(self):
+        assert analyze.support_class(float("nan")) == "other"
+        assert analyze.support_class(0.0) == "other"
+
+    def _two_sets(self, swim, kick):
+        """A workout of 4x`swim` 50s then one rep of 4 `kick` lengths."""
+        gaps = [0, 0] + [30, 0] * 3 + [30, 0, 0, 0]
+        return analyze._set_stats(
+            analyze.assign_sets(_lengths([swim] * 8 + [kick] * 4, gaps=gaps)))
+
+    def test_the_ratio_is_against_the_swimmers_own_day(self):
+        """The same 36 s length is kick on a fast day and nothing on a slow one."""
+        fast = self._two_sets(20.0, 36.0)
+        slow = self._two_sets(34.0, 36.0)
+        assert fast["free_ref_s"].iloc[0] < slow["free_ref_s"].iloc[0]
+        assert fast["set_pace_ratio"].iloc[-1] > slow["set_pace_ratio"].iloc[-1]
+        assert analyze.support_class(fast["set_pace_ratio"].iloc[-1]) == "kick"
+        assert analyze.support_class(slow["set_pace_ratio"].iloc[-1]) == "other"
+
+    def test_free_reference_ignores_a_missed_wall(self):
+        """The minimum here is routinely a sensor defect; the 15th percentile is
+        not, which is why the reference is taken there."""
+        df = analyze._set_stats(analyze.assign_sets(_lengths([25.0] * 20 + [3.0])))
+        assert df["free_ref_s"].iloc[0] > 10.0
+
+    def test_effort_needs_the_swimmers_own_kick_history(self):
+        """With no support work learned, no character is claimed."""
+        assert analyze.support_effort(30.0, 40.0, {"_global": {}}) is None
+
+    def test_an_expensive_kick_set_on_long_rest_was_worked(self):
+        params = {"_global": {"kick_cost_p67": 21.0, "kick_rest_p50": 20.0}}
+        assert analyze.support_effort(30.0, 40.0, params) == "effort"
+
+    def test_a_cheap_kick_set_on_short_rest_was_aerobic(self):
+        params = {"_global": {"kick_cost_p67": 21.0, "kick_rest_p50": 20.0}}
+        assert analyze.support_effort(8.0, 10.0, params) == "aerobic"
+
+    def test_expensive_but_on_short_rest_is_not_called_effort(self):
+        """Both signals have to agree: a hard set buys recovery."""
+        params = {"_global": {"kick_cost_p67": 21.0, "kick_rest_p50": 20.0}}
+        assert analyze.support_effort(30.0, 5.0, params) == "aerobic"
+
+    def test_only_support_work_gets_a_character(self):
+        """A butterfly set is described by being butterfly."""
+        df = analyze._set_stats(analyze.assign_sets(_lengths([24.0] * 8)))
+        df["hr_cost"] = 30.0
+        df["hr_abs"] = 150.0
+        out = analyze.classify(df, {"_global": {"kick_cost_p67": 21.0}})
+        assert out.loc[out["predicted"] == "freestyle", "effort"].isna().all()
+
+    def test_kick_and_drill_are_not_ranked_for_speed(self):
+        """A 68 s 'kick 50' is slow because it is kick, not because it was bad."""
+        assert "kick" in analyze.UNNAMED_STROKES
+        assert "drill" in analyze.UNNAMED_STROKES
+        assert "kick" not in analyze.NAMED_STROKES

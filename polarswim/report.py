@@ -163,6 +163,18 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 "n": int(len(sub)),
                 "stroke": run[0]["stroke"],
                 "pattern": run[0]["pattern"],
+                # Support work carries two extra facts, because "kick" on its own
+                # invites the question. `effort` is how hard it was against this
+                # swimmer's own kick sets, and `pace_ratio` is the evidence for
+                # calling it kick rather than drill in the first place — the
+                # boundary between them is a judgment, so the number it was
+                # judged on is shown rather than hidden.
+                "effort": (str(sub["effort"].mode().iloc[0])
+                           if "effort" in sub.columns
+                           and sub["effort"].notna().any() else None),
+                "pace_ratio": (round(float(sub["set_pace_ratio"].iloc[0]), 2)
+                               if "set_pace_ratio" in sub.columns
+                               and pd.notna(sub["set_pace_ratio"].iloc[0]) else None),
                 "confidence": float(sub["confidence"].mean()),
                 "pace_s": float(sub["pace_s"].median()),
                 # Per 50 for display: a 50 is the unit swimmers actually quote,

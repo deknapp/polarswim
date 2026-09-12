@@ -21,8 +21,8 @@ from . import ai, analyze, db, image, learn, metrics, render, report
 # card describe a stroke with the same colour.
 PIE_COLORS = {
     "freestyle": "#4aa3ff", "backstroke": "#3ddc84", "breaststroke": "#f0883e",
-    "butterfly": "#bc7cff", "other": "#c9d1d9", "undetermined": "#6b7280",
-    "IM": "#f5d565",
+    "butterfly": "#bc7cff", "kick": "#c98b52", "drill": "#c9d1d9",
+    "other": "#8b949e", "undetermined": "#6b7280", "IM": "#f5d565",
 }
 
 PAGE = """<!doctype html>
@@ -444,8 +444,11 @@ function renderPRs(){
      </div>
    </div>`;
 }
+// Kick and drill are correctable in their own right. Lumping them under one
+// label made the correction useless: a swimmer who fixes a set to "kick" is
+// telling the model something specific, and it has to be able to hear it.
 const FIX_STROKES=['freestyle','backstroke','breaststroke','butterfly','IM',
-                   'other','undetermined'];
+                   'kick','drill','other','undetermined'];
 
 async function loadFix(){
   if(!cur) return;
