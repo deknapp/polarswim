@@ -218,7 +218,11 @@ function renderAnalysis(d){
      <th>time</th><th>zone</th><th>speed</th><th>pace/50</th><th>rest</th><th></th></tr>
      ${d.sets.map(s=>`<tr><td>${setLabel(s)}</td>
        <td><b>${s.reps}×${s.rep_yards}</b></td>
-       <td class="${s.confidence<0.4?'lo':''}">${s.stroke}</td>
+       <td class="${s.confidence<0.4?'lo':''}">${s.pattern||s.stroke}${s.pattern
+           ?` <span class="dim" title="Recognised as a window of the medley order
+              — fly, back, breast, free — from its leg times. The order names the
+              strokes, which pace alone cannot: this swimmer's backstroke and
+              breaststroke run at the same speed.">◇</span>`:''}</td>
        <td>${s.confidence.toFixed(2)}</td>
        <td>${fmtTime(s.rep_seconds)}</td>
        <td>${s.hr_zone?`<span class="chip" style="background:${s.hr_zone.color}">
@@ -477,7 +481,7 @@ function renderFix(d,l){
        <tr style="background:var(--bg)">
          <td><b>set ${setLabel(s)}</b></td>
          <td><b>${s.reps}×${s.rep_yards}</b></td>
-         <td class="${s.confidence<0.4?'lo':''}">${s.stroke}
+         <td class="${s.confidence<0.4?'lo':''}">${s.pattern||s.stroke}
            ${s.mixed?'<span class="dim">(mixed)</span>':''}</td>
          <td>${fmtTime(s.rep_seconds)}</td>
          <td class="dim">${s.rest_before_s.toFixed(0)}s</td>

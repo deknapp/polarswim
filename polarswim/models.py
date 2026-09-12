@@ -137,6 +137,11 @@ predictions = Table(
     # wall split one, 1 for the overwhelming majority that need no correction.
     Column("length_factor", Float, default=1.0),
     Column("repair_kind", String(8)),        # 'merged' | 'split' | NULL
+    # The medley window this length belonged to, if any: 'IM', 'IM no fly',
+    # 'fly/back'. Stored per length rather than per rep because `predictions` is
+    # keyed per length, and it is what lets a set be reported as the shape it was
+    # rather than as its majority stroke.
+    Column("pattern", String(24)),
     Column("predicted_at", String(32), nullable=False),
     ForeignKeyConstraint(["workout_id", "idx"], ["lengths.workout_id", "lengths.idx"],
                          ondelete="CASCADE"),

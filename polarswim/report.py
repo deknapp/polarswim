@@ -62,6 +62,16 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     model = learn.from_params(params)
     if model.is_usable():
         df = learn.apply(df, model)
+
+    # Medley windows, after the model and before the corrections, exactly as
+    # `analyze` orders them — the two functions have to agree or the card and the
+    # stored predictions describe different swims. The ratios are LOADED, not
+    # relearned: measuring them needs every medley in the history, and rendering
+    # one workout must not pay for a full-database pass.
+    from . import patterns as pat
+    ratios = pat.from_params(params)
+    df = pat.label_patterns(df, pat.detect_patterns(df, ratios))
+
     df = analyze.enforce_rep_consistency(df)
     return learn.apply_labels(df, db.load_labels(engine, workout_id))
 
@@ -115,6 +125,12 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                                 and r["im_continuous"].all())
                        else (r["predicted"].mode().iloc[0]
                              if len(r["predicted"].mode()) else "undetermined")),
+            # What to CALL the rep, which is not always its ranking stroke: a 150
+            # of back/breast/free is named `IM no fly` and ranked as nothing,
+            # because it is not an event.
+            "pattern": (str(r["pattern"].iloc[0])
+                        if "pattern" in r.columns and r["pattern"].notna().all()
+                        and r["pattern"].nunique() == 1 else None),
             "rest_before_s": float(r["rest_before_s"].iloc[0])
                              if "rest_before_s" in r.columns else 0.0,
         } for rid, r in reps]
@@ -122,7 +138,8 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
         # Consecutive intervals of the same stroke AND distance become one row.
         runs: list[list[dict]] = []
         for d in detail:
-            if runs and all(runs[-1][0][k] == d[k] for k in ("stroke", "yards")):
+            if runs and all(runs[-1][0][k] == d[k]
+                            for k in ("stroke", "yards", "pattern")):
                 runs[-1].append(d)
             else:
                 runs.append([d])
@@ -145,6 +162,7 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 "rep_seconds": rep_seconds,
                 "n": int(len(sub)),
                 "stroke": run[0]["stroke"],
+                "pattern": run[0]["pattern"],
                 "confidence": float(sub["confidence"].mean()),
                 "pace_s": float(sub["pace_s"].median()),
                 # Per 50 for display: a 50 is the unit swimmers actually quote,
@@ -171,15 +189,23 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 # 80th percentile, and the swimmer reasonably read that as having
                 # swum a fast 50. There is no swimming speed to report for a set
                 # that was not swum as a stroke.
-                if row["stroke"] in analyze.UNNAMED_STROKES:
+                # More than one stroke in the rep, which is what disqualifies
+                # it from a single-stroke ranking — not merely the presence of a
+                # pattern name, since a 50 fly identified by its block is still a
+                # 50 fly and still belongs in the 50 fly field.
+                partial = (bool(sub["mixed_rep"].any())
+                           if "mixed_rep" in sub.columns else False) \
+                    and row["stroke"] != "IM"
+                if row["stroke"] in analyze.UNNAMED_STROKES or partial:
                     row["speed"] = None
                 elif row["stroke"] == "IM":
                     row["speed"] = ref.im_percentile(rep_yards, rep_seconds)
                 else:
                     row["speed"] = ref.speed_percentile(rep_yards, rep_seconds,
                                                         row["stroke"])
-                row["pr"] = ref.check_pr(rep_yards, row["stroke"], fastest,
-                                         int(sub["workout_id"].iloc[0]))
+                row["pr"] = (False if partial else
+                             ref.check_pr(rep_yards, row["stroke"], fastest,
+                                          int(sub["workout_id"].iloc[0])))
                 row["best_rep_s"] = fastest
             out.append(row)
     return out

@@ -285,3 +285,53 @@ class TestLabelling:
 
     def test_an_empty_frame_is_handled(self):
         assert patterns.detect_patterns(pd.DataFrame()) == []
+
+
+class TestPipelineWiring:
+    """The pattern labels have to survive everything that runs after them."""
+
+    def _analysed(self):
+        """An IM ladder, labelled as the pipeline would label it."""
+        df = _workout([
+            _legs(analyze.IM_ORDER[:2], per_leg=2),
+            _legs(analyze.IM_ORDER[:3], per_leg=2),
+            _legs(analyze.IM_ORDER, per_leg=2),
+        ])
+        df["predicted"] = "freestyle"
+        df["confidence"] = 0.5
+        found = patterns.detect_patterns(df, ratios={}, anchors=[
+            dict(workout_id=1, rep_id=3, reverse=False, pace=dict(PROFILE.pace))])
+        return patterns.label_patterns(df, found)
+
+    def test_rep_consistency_does_not_collapse_a_pattern(self):
+        """A 150 of back/breast/free changes stroke twice without stopping, which
+        is exactly what the majority rule would erase."""
+        df = self._analysed()
+        out = analyze.enforce_rep_consistency(df)
+        for _, g in out.groupby("rep_id"):
+            assert g["predicted"].nunique() == len(g["pattern"].iloc[0].split("/")) \
+                or g["pattern"].iloc[0].startswith("IM")
+        assert out.loc[out["rep_id"] == 2, "predicted"].tolist() == [
+            "butterfly", "butterfly", "backstroke", "backstroke",
+            "breaststroke", "breaststroke"]
+
+    def test_a_multi_stroke_rep_is_marked_mixed(self):
+        df = self._analysed()
+        assert df["mixed_rep"].all()
+
+    def test_a_single_leg_member_is_not_named_a_pattern(self):
+        """The 50 fly that opens a ladder is a genuine 50 fly: it keeps its own
+        stroke, stays eligible for its own best, and is not called a pattern."""
+        df = _workout([
+            _legs(analyze.IM_ORDER[:1], per_leg=2),
+            _legs(analyze.IM_ORDER, per_leg=2),
+        ])
+        df["predicted"] = "freestyle"
+        df["confidence"] = 0.5
+        out = patterns.label_patterns(df, patterns.detect_patterns(
+            df, ratios={}, anchors=[dict(workout_id=1, rep_id=2, reverse=False,
+                                         pace=dict(PROFILE.pace))]))
+        first = out[out["rep_id"] == 1]
+        assert first["predicted"].tolist() == ["butterfly", "butterfly"]
+        assert first["pattern"].isna().all()
+        assert not first["mixed_rep"].any()

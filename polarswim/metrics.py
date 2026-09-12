@@ -343,10 +343,15 @@ def build_reference(engine: Engine, lengths_df: pd.DataFrame) -> SwimmerReferenc
     if "length_factor" not in lengths_df.columns:
         lengths_df = lengths_df.assign(length_factor=1.0)
     single_stroke = lengths_df
-    if "im_continuous" in lengths_df.columns:
-        # Reps that are themselves a medley are ranked as medleys, below.
-        medley_reps = (lengths_df.loc[lengths_df["im_continuous"],
-                                      ["workout_id", "rep_id"]]
+    # A rep that covered more than one stroke has no single-stroke time. A whole
+    # medley is ranked as a medley below; a partial window — a 150 of
+    # back/breast/free — is not an event at all, and letting it into the 150
+    # backstroke field on a majority label would put a time there that nobody
+    # swam as backstroke.
+    mixed = [c for c in ("im_continuous", "mixed_rep") if c in lengths_df.columns]
+    if mixed:
+        excluded = lengths_df[mixed].any(axis=1)
+        medley_reps = (lengths_df.loc[excluded, ["workout_id", "rep_id"]]
                        .drop_duplicates())
         if len(medley_reps):
             single_stroke = lengths_df.merge(

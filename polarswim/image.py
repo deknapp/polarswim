@@ -180,8 +180,9 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
                      f'height="{ROW_H}" rx="5" fill="{PANEL}"/>')
         o.append(f'<text x="{PAD}" y="{y}" fill="{FG}" font-size="19" '
                  f'font-weight="600">{s["reps"]}×{s["rep_yards"]}</text>')
+        name = s.get("pattern") or STROKE_LABEL.get(s["stroke"], s["stroke"])
         o.append(f'<text x="{PAD + 120}" y="{y}" fill="{FG}" font-size="17">'
-                 f'{_esc(STROKE_LABEL.get(s["stroke"], s["stroke"]))}</text>')
+                 f'{_esc(name)}</text>')
         if s.get("confidence", 1) < 0.4:
             o.append(f'<text x="{PAD + 232}" y="{y}" fill="{PR_GOLD}" '
                      f'font-size="13">?</text>')

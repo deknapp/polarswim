@@ -625,14 +625,18 @@ def label_patterns(df: pd.DataFrame, matches: list[PatternMatch]) -> pd.DataFram
     made it recognisable — so these labels replace the pace/cost prediction and
     carry the match's own confidence.
 
-    Three columns come out of this, and they answer three different questions:
-    `pattern` is what to CALL the rep (`200 IM`, `150 IM no fly`), `pattern_block`
-    is which run of reps it belongs to so a ladder can be shown as one set, and
-    `im_continuous` is whether the rep is a whole medley and therefore not a rep
-    of any single stroke.
+    Four columns come out of this, and they answer four different questions.
+    `pattern` is what to CALL the rep (`IM`, `IM no fly`). `pattern_block` is
+    which run of reps it belongs to, so a ladder can be shown as the one set it
+    was. `mixed_rep` is whether the rep covered more than one stroke, which is
+    what disqualifies it from a single-stroke personal best — a 150 of
+    back/breast/free must not win the 150 backstroke. And `im_continuous` is the
+    narrower question of whether it was a WHOLE medley, which is what qualifies it
+    for the medley bests instead.
     """
     df = df.copy()
-    for col, fill in (("pattern", None), ("pattern_block", 0)):
+    for col, fill in (("pattern", None), ("pattern_block", 0),
+                      ("mixed_rep", False)):
         if col not in df.columns:
             df[col] = fill
     if "im_continuous" not in df.columns:
@@ -640,12 +644,21 @@ def label_patterns(df: pd.DataFrame, matches: list[PatternMatch]) -> pd.DataFram
     if not matches:
         return df
 
-    labels: dict[tuple[int, int], tuple[str, float, str, int, bool]] = {}
+    labels: dict[tuple[int, int], tuple[str, float, str, int, bool, bool]] = {}
     for m in matches:
+        mixed = len(m.legs) >= MIN_LEGS
         for pos, idx in enumerate(m.idxs):
             labels[(m.workout_id, idx)] = (
-                m.legs[pos // m.leg_lengths], m.confidence, m.name,
-                m.block, m.is_medley)
+                m.legs[pos // m.leg_lengths], m.confidence,
+                # A single-leg member of a block is not a pattern, it is a rep
+                # whose stroke the block happened to identify. Naming it one
+                # would cost it its own personal best: the 50 fly that opens an
+                # IM ladder is a genuine 50 fly and belongs in the 50 fly field,
+                # while the 150 of back/breast/free beside it is not an event at
+                # all. So the useful part — the stroke — is written either way,
+                # and only a multi-stroke rep is named and set aside.
+                m.name if mixed else None,
+                m.block, m.is_medley, mixed)
 
     key = list(zip(df["workout_id"], df["idx"]))
     hit = [k in labels for k in key]
@@ -657,6 +670,7 @@ def label_patterns(df: pd.DataFrame, matches: list[PatternMatch]) -> pd.DataFram
     df.loc[hit, "pattern"] = [c[2] for c in chosen]
     df.loc[hit, "pattern_block"] = [c[3] for c in chosen]
     df.loc[hit, "im_continuous"] = [c[4] for c in chosen]
+    df.loc[hit, "mixed_rep"] = [c[5] for c in chosen]
     return df
 
 

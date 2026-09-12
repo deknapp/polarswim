@@ -96,6 +96,7 @@ class AnalysisResult:
     params: dict[str, dict[str, float]] = field(default_factory=dict)
     repairs: list[Repair] = field(default_factory=list)
     im_rounds: list["IMRound"] = field(default_factory=list)
+    stroke_patterns: list = field(default_factory=list)
     n_lengths: int = 0
 
     def counts(self) -> dict[str, int]:
@@ -609,8 +610,12 @@ def enforce_rep_consistency(df: pd.DataFrame) -> pd.DataFrame:
     consistent, and removes a class of error the per-length rules cannot see
     because they have no notion of "the swim this length belongs to".
 
-    Medley reps are exempt: four strokes in one unbroken swim is exactly what an
-    IM is, and it is identified structurally rather than from these labels.
+    Reps with a recognised medley pattern are exempt, and they are the reason the
+    exemption cannot be phrased as "medleys". Several strokes in one unbroken swim
+    is exactly what a medley window IS — a 150 of back/breast/free changes stroke
+    twice without stopping — and `patterns` identifies those structurally, from
+    the leg times, rather than from the labels this function is reconciling.
+    Collapsing one to its majority would erase the very thing that was detected.
     """
     if df.empty or "rep_id" not in df.columns:
         return df
@@ -621,6 +626,8 @@ def enforce_rep_consistency(df: pd.DataFrame) -> pd.DataFrame:
 
     for _, g in df.groupby(["workout_id", "rep_id"], sort=False):
         if "im_continuous" in g.columns and g["im_continuous"].any():
+            continue
+        if "mixed_rep" in g.columns and g["mixed_rep"].any():
             continue
         if g["predicted"].nunique() <= 1:
             continue
@@ -742,6 +749,13 @@ def analyze(engine: Engine, workout_id: int | None = None,
     im = detect_im(df)
     df = label_im(df, im)
 
+    # The per-stroke reference is learned from the whole history for the same
+    # reason the pace thresholds are: a single workout rarely contains enough
+    # medleys to measure four strokes against each other.
+    from . import patterns as pat
+    ratios = pat.learn_ratios(full)
+    params.update(pat.as_params(ratios))
+
     # Corrections train the model and then override it. Fitting happens here,
     # over the whole history in one pass, and the result is written to
     # `model_params` so every later view loads it instead of refitting.
@@ -752,6 +766,14 @@ def analyze(engine: Engine, workout_id: int | None = None,
         if fitted.is_usable():
             params.update(fitted.as_params())
             df = learn.apply(df, fitted)
+    # Medley patterns land after the fitted model, not before it. The model is a
+    # per-length pace/cost classifier and the pattern is a structural reading of a
+    # whole rep, so where they disagree the structure is the better evidence — and
+    # `learn.apply` would otherwise overwrite a recognised 150 back/breast/free
+    # one length at a time.
+    matches = pat.detect_patterns(df, ratios, pat.find_anchors(full))
+    df = pat.label_patterns(df, matches)
+
     # After every automatic step and before the swimmer's own word: a rep is one
     # stroke, but a correction may say otherwise and must still win.
     df = enforce_rep_consistency(df)
@@ -762,6 +784,7 @@ def analyze(engine: Engine, workout_id: int | None = None,
                  predicted=r.predicted, confidence=float(r.confidence),
                  method="pace_cost_rest_v2", set_id=int(r.set_id),
                  length_factor=float(r.length_factor),
+                 pattern=getattr(r, "pattern", None),
                  repair_kind=kinds.get((r.workout_id, r.idx)),
                  inferred_split=int(kinds.get((r.workout_id, r.idx)) == "merged"))
             for r in df.itertuples()]
@@ -771,4 +794,4 @@ def analyze(engine: Engine, workout_id: int | None = None,
         db.save_predictions(engine, rows)
 
     return AnalysisResult(predictions=rows, params=params, repairs=repairs,
-                          im_rounds=im, n_lengths=len(df))
+                          im_rounds=im, stroke_patterns=matches, n_lengths=len(df))

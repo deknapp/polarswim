@@ -225,8 +225,11 @@ def set_card(df: pd.DataFrame, header: dict, sets: list[dict] | None = None,
     lines += ["", "set · time · zone · speed · pace/50"]
 
     for row in sets:
-        label = STROKE_GLYPH.get(row["stroke"], row["stroke"][:4]).strip()
-        square = STROKE_COLOR.get(row["stroke"], "⬛")
+        # A recognised medley window names itself. `IM no fly` is both shorter and
+        # truer than `back`, which is what the majority label would have said.
+        label = (row.get("pattern")
+                 or STROKE_GLYPH.get(row["stroke"], row["stroke"][:4]).strip())
+        square = STROKE_COLOR.get("IM" if row.get("pattern") else row["stroke"], "⬛")
         parts = [f"{square} {row['reps']}×{row['rep_yards']} {label}",
                  _fmt_rep(row["rep_seconds"])]
 
