@@ -159,6 +159,7 @@ class PatternMatch:
     confidence: float
     source: str
     block: int = 0                  # consecutive matched reps share a block number
+    part: int = 0                   # which rung, where one rep held two; else 0
 
     @property
     def name(self) -> str:
@@ -559,6 +560,212 @@ def _score_block(block: Block) -> None:
         m.confidence = round(min(0.95, max(0.35, conf)), 3)
 
 
+# --- ladders ----------------------------------------------------------------
+# Everything above reads strokes from pace, and on some days pace cannot. The
+# 2026-09-13 practice held an IM ladder in 25s — 25 fly, 50 fly/back, 75, 100 IM,
+# then back down dropping fly — and every rep of it failed: that day's butterfly
+# went 25.6 s against a 25.6 s freestyle leg, and back and breast sat together at
+# 30, so "it was all one stroke" fit each rep as well as any window did. No seed,
+# so no block, so nothing.
+#
+# What the practice DID carry was shape. Seven consecutive reps of 1, 2, 3, 4, 3,
+# 2, 1 legs is written down as a ladder, and a ladder over the medley order has
+# almost nothing left to guess: climbing, each rep adds a stroke at one end;
+# descending, each drops one from an end. Which end, and which way round the
+# order runs, is at most eight readings, and each names every length outright.
+#
+# Shape alone cannot tell it from a freestyle ladder, and that practice swam one
+# straight after. What does is the one pace fact that holds for this swimmer on
+# every day in the history: freestyle is the fastest stroke. So the lengths the
+# reading calls free must be clearly faster than the rest. Across the history the
+# IM ladders put their non-free lengths 1.2-1.5x their free ones; the freestyle
+# ladders of the same shape sit within a few percent.
+LADDER_MIN_REPS = 4        # the full medley at the top, and three rungs around it
+LADDER_MIN_GAP = 1.10      # non-free lengths against free ones, median to median
+# Four per-stroke medians will always fit better than one, so the reading has to
+# beat "every length was one stroke" by more than that freedom buys on noise.
+LADDER_MARGIN = 1.5
+# The 2026-09-13 ladder came down 75 back/breast/free, then 50 breast/free and
+# the last 25 free with no stop at the wall between them — 29.6, 22.4, 16.0, one
+# unbroken swim to the watch. So a rep may hold two neighbouring rungs back to
+# back and is read as both. Never more than two: three rungs in one swim is a
+# longer rep that happens to divide, not a ladder.
+
+
+@dataclass
+class _Rung:
+    rep_id: int
+    g: pd.DataFrame
+    k: int                          # legs
+    part: int = 0                   # 1 or 2 where the rep held two rungs
+
+
+def _rung(g: pd.DataFrame, L: int, k: int, part: int = 0) -> _Rung | None:
+    """Records `g` as a `k`-leg rung of `L` lengths per leg, or None if not one."""
+    if not 1 <= k <= len(IM_ORDER) or len(g) != k * L:
+        return None
+    legs = _leg_pace(g, k)
+    if legs is None or legs.min() <= 0:
+        return None
+    return _Rung(int(g["rep_id"].iloc[0]), g, k, part)
+
+
+def _two_rungs(g: pd.DataFrame, L: int, k: int, step: int) -> list[_Rung] | None:
+    """One rep read as rung `k` and rung `k - 1`, in the order they were swum.
+
+    Walking away from the peak, the `k`-leg rung is the nearer one: on the way
+    down (`step` > 0) it comes first in the rep, on the way up it comes last.
+    """
+    if k < 2 or len(g) != (2 * k - 1) * L:
+        return None
+    if step > 0:
+        pair = [_rung(g.iloc[:k * L], L, k, 1), _rung(g.iloc[k * L:], L, k - 1, 2)]
+    else:
+        cut = (k - 1) * L
+        pair = [_rung(g.iloc[:cut], L, k - 1, 1), _rung(g.iloc[cut:], L, k, 2)]
+    return None if any(r is None for r in pair) else pair
+
+
+def _find_ladders(w: pd.DataFrame) -> list[tuple[int, list[_Rung]]]:
+    """Runs of consecutive reps that climb to a full medley and/or descend from one.
+
+    Each run is built outwards from a four-leg rep, one leg fewer per rung in both
+    directions, where a rep is one rung or two swum back to back. Two four-leg
+    reps side by side are a `2x100 IM`, not a ladder, and this never joins them:
+    the neighbour of a peak has to start with three legs.
+    """
+    reps = {int(rid): g.sort_values("idx") for rid, g in w.groupby("rep_id")}
+    out: list[tuple[int, list[_Rung]]] = []
+    used: set[int] = set()
+    n = len(IM_ORDER)
+    for rid in sorted(reps):
+        g = reps[rid]
+        if rid in used or len(g) % n:
+            continue
+        L = len(g) // n
+        peak = _rung(g, L, n)
+        if peak is None:
+            continue
+        rungs = [peak]
+        for step in (-1, 1):
+            k, r = n, rid
+            while k > 1 and r + step in reps and r + step not in used:
+                nxt_g = reps[r + step]
+                one = _rung(nxt_g, L, k - 1)
+                nxt = [one] if one is not None else _two_rungs(nxt_g, L, k - 1, step)
+                if not nxt:
+                    break
+                rungs = nxt + rungs if step < 0 else rungs + nxt
+                k, r = k - len(nxt), r + step
+        if len(rungs) >= LADDER_MIN_REPS:
+            out.append((L, rungs))
+            used |= {x.rep_id for x in rungs}
+    return out
+
+
+def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
+    """Name every length of a ladder by its shape, or decline.
+
+    Every reading the shape allows is scored the same way — each stroke's lengths
+    against that stroke's own median — so they compete on equal terms, and the
+    winner is then held to the two tests that separate a medley from a ladder of
+    one stroke: freestyle clearly fastest, and a far better fit than no strokes
+    at all.
+    """
+    n = len(IM_ORDER)
+    top = next(i for i, r in enumerate(rungs) if r.k == n)
+    readings: dict[tuple[tuple[str, ...], ...], bool] = {}
+    for reverse in (False, True):
+        order = IM_ORDER[::-1] if reverse else IM_ORDER
+        for climb_drops_front in (False, True):
+            for descent_drops_front in (False, True):
+                wins = []
+                for i, r in enumerate(rungs):
+                    front = climb_drops_front if i < top else descent_drops_front
+                    wins.append(tuple(order[n - r.k:]) if front else tuple(order[:r.k]))
+                readings.setdefault(tuple(wins), reverse)
+
+    def lengths(wins):
+        for r, win in zip(rungs, wins):
+            real = r.g
+            for pos, pace in enumerate(real["pace_s"].to_numpy(dtype=float)):
+                yield win[pos // L], pace
+
+    def score(wins) -> tuple[float, dict[str, float], np.ndarray, np.ndarray]:
+        pairs = list(lengths(wins))
+        by = {s: np.array([p for t, p in pairs if t == s]) for s in IM_ORDER}
+        med = {s: float(np.median(v)) for s, v in by.items() if len(v)}
+        strokes = np.array([t for t, _ in pairs])
+        paces = np.array([p for _, p in pairs])
+        pred = np.array([med[t] for t in strokes])
+        return float(np.mean(np.abs(paces - pred) / pred)), med, strokes, paces
+
+    scored = []
+    for wins, reverse in readings.items():
+        err, med, strokes, paces = score(wins)
+        scored.append((err * (REVERSE_PENALTY if reverse else 1.0), err, wins, med,
+                       strokes, paces))
+    scored.sort(key=lambda s: s[0])
+    _, err, wins, med, strokes, paces = scored[0]
+
+    if len(med) < n or min(med, key=med.get) != "freestyle":
+        return []
+
+    # A rep read as two rungs has a rival the readings above never score: the same
+    # records as ONE medley window. 2026-06-01 closed a 2x100 IM with 75s of
+    # back/breast/free, and the last went 29.6, 28.0, 23.2 — reading that as
+    # breast then free then free puts a 28.0 on freestyle. Where the single window
+    # fits at least as well, the ladder stops short of that rep.
+    def fit(p: np.ndarray, strokes: list[str]) -> float:
+        pred = np.array([med[s] for s in strokes])
+        return float(np.mean(np.abs(p - pred) / pred))
+
+    pairs: dict[int, list[int]] = {}
+    for i, r in enumerate(rungs):
+        if r.part:
+            pairs.setdefault(r.rep_id, []).append(i)
+    for i, j in pairs.values():
+        both = pd.concat([rungs[i].g, rungs[j].g])
+        whole = windows(len(both) // L)
+        if not whole:
+            continue
+        p = both["pace_s"].to_numpy(dtype=float)
+        split = [wins[x][pos // L] for x in (i, j) for pos in range(len(rungs[x].g))]
+        single = min(fit(p, [s for s in legs for _ in range(L)]) for legs, _ in whole)
+        if single <= fit(p, split):
+            keep = rungs[:i] if i > top else rungs[j + 1:]
+            return _read_ladder(L, keep) if len(keep) >= LADDER_MIN_REPS else []
+    free = paces[strokes == "freestyle"]
+    other = paces[strokes != "freestyle"]
+    gap = float(np.median(other)) / float(np.median(free))
+    overall = float(np.median(paces))
+    null = float(np.mean(np.abs(paces - overall) / overall))
+    margin = null / max(err, 1e-9)
+    if gap < LADDER_MIN_GAP or margin < LADDER_MARGIN:
+        return []
+
+    # The shape names the strokes, so confidence rests on how clearly the pace
+    # agrees: how far free stands off the rest, and how far clear of one stroke.
+    base = (0.72 + min(0.1, 0.5 * (gap - LADDER_MIN_GAP))
+            + min(0.06, 0.03 * (margin - LADDER_MARGIN)))
+    out = []
+    for r, win in zip(rungs, wins):
+        real = r.g
+        p = real["pace_s"].to_numpy(dtype=float)
+        pred = np.array([med[win[pos // L]] for pos in range(len(p))])
+        rung_err = float(np.mean(np.abs(p - pred) / pred))
+        conf = base - 1.5 * rung_err - (0.18 if r.k < MIN_LEGS else 0.0)
+        out.append(PatternMatch(
+            workout_id=int(r.g["workout_id"].iloc[0]), rep_id=r.rep_id,
+            set_id=int(r.g["set_id"].iloc[0]) if "set_id" in r.g.columns else 0,
+            legs=win, leg_lengths=L,
+            leg_pace_s=[round(float(x), 2) for x in _leg_pace(real, r.k)],
+            idxs=[int(i) for i in r.g["idx"]], score=round(rung_err, 4),
+            margin=round(margin, 2), confidence=round(min(0.9, max(0.35, conf)), 3),
+            source="ladder", part=r.part))
+    return out
+
+
 def detect_patterns(df: pd.DataFrame,
                     ratios: dict[str, float] | None = None,
                     anchors: list[dict] | None = None) -> list[PatternMatch]:
@@ -586,6 +793,20 @@ def detect_patterns(df: pd.DataFrame,
 
     block_no = 0
     for _, w in df.groupby("workout_id", sort=True):
+        # Ladders first, and without a profile: their evidence is shape, which
+        # needs no reference pace, and a day whose pace cannot part the strokes
+        # is exactly the day they are for.
+        claimed: set[int] = set()
+        for L, rungs in _find_ladders(w):
+            found = _read_ladder(L, rungs)
+            if not found:
+                continue
+            block_no += 1
+            for m in found:
+                m.block = block_no
+                claimed.add(m.rep_id)
+            out.extend(found)
+
         profile = profile_for(w, ratios, anchors)
         if profile is None:
             continue
@@ -594,7 +815,6 @@ def detect_patterns(df: pd.DataFrame,
                  if m is not None]
         # Best-fitting seed first, so the strongest evidence claims its
         # neighbourhood before a weaker seed can take part of it.
-        claimed: set[int] = set()
         for seed in sorted(seeds, key=lambda m: m.score):
             if seed.rep_id in claimed:
                 continue
@@ -613,7 +833,7 @@ def detect_patterns(df: pd.DataFrame,
                 claimed.add(seed.rep_id)
                 out.append(seed)
 
-    out.sort(key=lambda m: (m.workout_id, m.rep_id))
+    out.sort(key=lambda m: (m.workout_id, m.idxs[0]))
     return out
 
 
@@ -671,6 +891,23 @@ def label_patterns(df: pd.DataFrame, matches: list[PatternMatch]) -> pd.DataFram
     df.loc[hit, "pattern_block"] = [c[3] for c in chosen]
     df.loc[hit, "im_continuous"] = [c[4] for c in chosen]
     df.loc[hit, "mixed_rep"] = [c[5] for c in chosen]
+
+    # A rep that held two rungs of a ladder was two swims to the swimmer — the
+    # turn between them just too short for the watch to call it rest. It is split
+    # here, where it was recognised, so every later view (the set table, the
+    # bests, the corrections editor) sees the 50 and the 25 rather than a 75.
+    firsts = {(m.workout_id, m.idxs[0]) for m in matches if m.part == 2}
+    if firsts:
+        s = df.sort_values(["workout_id", "idx"])
+        split = pd.Series([k in firsts for k in zip(s["workout_id"], s["idx"])],
+                          index=s.index)
+        changed = s["rep_id"].ne(s.groupby("workout_id")["rep_id"].shift(1))
+        start = s.groupby("workout_id")["rep_id"].transform("min")
+        new = (changed | split).groupby(s["workout_id"]).cumsum() + start - 1
+        df.loc[s.index, "rep_id"] = new.astype(int)
+        if "rep_lengths" in df.columns:
+            df["rep_lengths"] = (df.groupby(["workout_id", "rep_id"])["idx"]
+                                 .transform("size"))
     return df
 
 

@@ -205,6 +205,66 @@ class TestBlocks:
         assert borrowed[0].confidence < local[0].confidence
 
 
+class TestLadders:
+    """An IM ladder named by its shape, on a day pace alone cannot read it."""
+
+    # The 2026-09-13 practice as the watch recorded it: 25 fly, 50 fly/back, 75,
+    # 100 IM, then back down dropping fly. Fly went 25.6 against a 25.6 free leg,
+    # so no rep of it is a medley on pace. The 50 breast/free and the last 25 free
+    # were swum straight through, so the watch saw one rep: 29.6, 22.4, 16.0.
+    IM_LADDER = [[27.2], [28.8, 30.4], [28.8, 30.4, 30.4], [25.6, 30.4, 28.8, 25.6],
+                 [33.6, 26.4, 24.0], [29.6, 22.4, 16.0]]
+    EXTRA_25 = [[27.2]]
+    # ...and the freestyle ladder swum after it, the same shape climbing.
+    FREE_LADDER = [[24.8], [25.6, 24.8], [24.8, 21.6, 24.8], [26.4, 22.4, 22.4, 27.2]]
+
+    def _detect(self, reps):
+        return patterns.detect_patterns(_workout(reps), ratios={}, anchors=[])
+
+    def test_the_ladder_is_read_with_no_profile_at_all(self):
+        found = self._detect(self.IM_LADDER)
+        assert [m.name for m in found] == [
+            "fly", "fly/back", "IM no free", "IM", "IM no fly", "breast/free", "free"]
+        assert len({m.block for m in found}) == 1
+
+    def test_two_rungs_swum_without_a_rest_are_split_apart(self):
+        """50 breast/free then 25 free, straight through, is a 50 and a 25."""
+        df = _workout(self.IM_LADDER + self.EXTRA_25)
+        df["predicted"] = "freestyle"
+        df["confidence"] = 0.5
+        out = patterns.label_patterns(
+            df, patterns.detect_patterns(df, ratios={}, anchors=[]))
+        tail = out[out["idx"].isin([14, 15, 16])]
+        assert tail["predicted"].tolist() == ["breaststroke", "freestyle", "freestyle"]
+        assert tail["pattern"].tolist()[:2] == ["breast/free", "breast/free"]
+        assert tail["rep_id"].tolist() == [6, 6, 7]
+        # ...and every rep after it moves along by one.
+        assert out.loc[out["idx"] == 17, "rep_id"].item() == 8
+
+    def test_a_medley_75_is_not_split_into_two_rungs(self):
+        """2026-06-01: 100 IM, then two 75s of back/breast/free. The last went
+        29.6, 28.0, 23.2 — slow, slow, fast — which is one window, not a 50
+        breast/free and a 25 free."""
+        assert self._detect([[26.4, 28.8, 29.6, 24.0], [26.4, 29.6, 24.0],
+                             [29.6, 28.0, 23.2]]) == []
+
+    def test_a_freestyle_ladder_of_the_same_shape_is_not_a_medley(self):
+        assert self._detect(self.FREE_LADDER) == []
+
+    def test_only_the_medley_ladder_is_claimed_when_both_are_swum(self):
+        found = self._detect(self.IM_LADDER + self.EXTRA_25 + self.FREE_LADDER)
+        assert sorted({m.rep_id for m in found}) == list(range(1, 7))
+
+    def test_a_ladder_needs_its_full_medley(self):
+        """25-50-75 without the 100 IM at the top is too little shape to name."""
+        assert self._detect(self.IM_LADDER[:3]) == []
+
+    def test_repeated_medleys_are_not_a_ladder(self):
+        """Two 100 IMs side by side are a 2x100, and neither is a rung of the other."""
+        im = [27.2, 32.8, 31.2, 22.0]
+        assert self._detect([im, im, [22.0] * 3, [22.0] * 2]) == []
+
+
 class TestProfile:
     """Where the per-stroke reference times come from."""
 
