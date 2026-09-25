@@ -160,6 +160,18 @@ def known_workout_ids(engine: Engine) -> set[int]:
         return {r[0] for r in c.execute(sa.select(workouts.c.id))}
 
 
+def known_training_ids(engine: Engine) -> set[int]:
+    """Sessions already stored, in the id the calendar lists them by.
+
+    Sync must compare against THIS, not `known_workout_ids`: the calendar hands
+    out session ids and `workouts.id` is the exercise id, so the two never match
+    and every sync silently re-fetched the whole history.
+    """
+    with engine.connect() as c:
+        return {r[0] for r in c.execute(sa.select(workouts.c.training_id)
+                                        .where(workouts.c.training_id.is_not(None)))}
+
+
 def summary(engine: Engine) -> dict:
     with engine.connect() as c:
         scalar = lambda stmt: c.execute(stmt).scalar() or 0
@@ -180,7 +192,7 @@ def upsert_workout(engine: Engine, w: Workout, raw: dict | None = None) -> None:
     """Load one workout and all its children in a single transaction."""
     interval = w.hr_interval_s or 1.0
     row = dict(
-        id=w.id, start_time=w.start_time, start_epoch=epoch_of(w.start_time),
+        id=w.id, training_id=w.training_id, start_time=w.start_time, start_epoch=epoch_of(w.start_time),
         stop_time=w.stop_time, sport_parent=w.sport_parent, sport_id=w.sport_id,
         duration_s=w.duration_s, distance_m=w.distance_m, calories=w.calories,
         avg_hr=w.avg_hr, max_hr=w.max_hr, pool_length_m=w.pool_length_m,

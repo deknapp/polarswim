@@ -28,7 +28,11 @@ metadata = MetaData()
 
 workouts = Table(
     "workouts", metadata,
-    Column("id", Integer, primary_key=True, autoincrement=False),  # Polar training id
+    Column("id", Integer, primary_key=True, autoincrement=False),  # Polar exercise id
+    # The SESSION id Flow's calendar lists and its details endpoint takes. It is
+    # not `id`: a session holds one or more exercises, each with its own id, and
+    # only this one lets sync recognise a session it already has without a fetch.
+    Column("training_id", Integer),
     Column("start_time", String(32), nullable=False),
     Column("start_epoch", Integer, nullable=False),                # derived, for range scans
     Column("stop_time", String(32)),

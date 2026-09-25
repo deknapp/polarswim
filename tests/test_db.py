@@ -185,3 +185,30 @@ def test_a_column_the_database_has_but_the_model_dropped_is_left_alone(engine):
     assert db.migrate(engine) == []
     cols = {c["name"] for c in sa.inspect(engine).get_columns("workouts")}
     assert "legacy_note" in cols
+
+
+def test_sync_recognises_a_stored_session_by_its_session_id(engine, pool_swim_payload):
+    """The calendar lists SESSION ids; `workouts.id` is the exercise id. Comparing
+    the two re-fetched the whole history on every sync and never kept a payload."""
+    from polarswim import sync
+
+    class Client:
+        fetched: list[int] = []
+
+        def exercise_ids(self, start, end):
+            return [pool_swim_payload["id"]]
+
+        def analysis_details(self, tid):
+            self.fetched.append(tid)
+            return pool_swim_payload
+
+    import datetime as dt
+    c = Client()
+    day = dt.date(2026, 1, 2)
+    first = sync.sync_range(engine, c, day, day)
+    second = sync.sync_range(engine, c, day, day)
+    assert (first.fetched, second.fetched, second.skipped) == (1, 0, 1)
+    assert db.known_training_ids(engine) == {pool_swim_payload["id"]}
+    with engine.connect() as conn:
+        assert conn.execute(sa.select(sa.func.count())
+                            .select_from(raw_payloads)).scalar() == 1

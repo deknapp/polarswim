@@ -70,6 +70,7 @@ class Workout:
     hr_interval_s: float | None
     hr_values: list[int] = field(default_factory=list)
     lengths: list[Length] = field(default_factory=list)
+    training_id: int | None = None   # the session this exercise belongs to
 
     @property
     def is_pool_swim(self) -> bool:
@@ -125,5 +126,6 @@ def parse_details(details: dict) -> list[Workout]:
             hr_interval_s=iso_duration_seconds(hr_block.get("interval")),
             hr_values=hr_values,
             lengths=lengths,
+            training_id=int(details["id"]) if details.get("id") else None,
         ))
     return out

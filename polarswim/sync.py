@@ -65,7 +65,7 @@ def sync_range(
     res.events_seen = len(ids)
     progress(f"{len(ids)} sessions in range")
 
-    known = set() if force else db.known_workout_ids(engine)
+    known = set() if force else db.known_training_ids(engine)
     todo = [i for i in ids if i not in known]
     res.skipped = len(ids) - len(todo)
     if limit is not None:
@@ -86,8 +86,12 @@ def sync_range(
             progress(f"  [{n}/{len(todo)}] {tid}: FAILED {type(e).__name__}")
             continue
 
+        # The payload is keyed by the session and the rows by the exercise, so the
+        # old `w.id == tid` test never matched and no payload was ever kept. Each
+        # exercise keeps the whole payload: it parses back to all of them, and a
+        # multisport session is rare enough that the duplication costs nothing.
         for w in workouts:
-            db.upsert_workout(engine, w, raw=payload if w.id == tid else None)
+            db.upsert_workout(engine, w, raw=payload)
             if w.is_pool_swim:
                 res.pool_swims += 1
         res.fetched += 1
