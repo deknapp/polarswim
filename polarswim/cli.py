@@ -14,6 +14,12 @@ is there because it is what the database and the web UI show.
     polarswim serve [--port 8770]   local web UI
     polarswim up                    sync the latest swims, then open the UI
     polarswim reparse
+    polarswim plan <date|id|latest> FILE   read a swim against its written workout
+    polarswim plan <date|id|latest> --show
+    polarswim plan <date|id|latest> --clear
+
+A plan is the workout as written (a .txt, or a .pdf via `pdftotext`). Put `#` in
+front of any line you did not swim.
 """
 
 from __future__ import annotations
@@ -171,6 +177,36 @@ def cmd_analyze(args) -> int:
         print(f"\n  learned reference paces (s/25yd) from {int(g['n_obs']):,} lengths:")
         print(f"    p10 {g['pace_p10']:.1f}   p50 {g['pace_p50']:.1f}   "
               f"p90 {g['pace_p90']:.1f}")
+    return 0
+
+
+def cmd_plan(args) -> int:
+    """Store a written workout for one swim, re-analyze it, show the alignment."""
+    from . import plan as plan_
+    engine = db.connect(args.db)
+    wid = resolve_workout(engine, args.workout)
+    if args.clear:
+        n = db.clear_plan(engine, wid)
+        analyze.analyze(engine)
+        print(f"removed the plan for {wid}" if n else f"no plan stored for {wid}")
+        return 0
+    if args.file:
+        text = plan_.read_plan_file(args.file)
+        if not plan_.parse_plan(text):
+            print("no swims found in that plan — expected lines like "
+                  "`5 x 50 Free @1:10`", file=sys.stderr)
+            return 1
+        db.save_plan(engine, wid, text)
+        analyze.analyze(engine)
+    text = db.load_plans(engine, [wid]).get(wid)
+    if not text:
+        print(f"no plan stored for {wid}; pass a file", file=sys.stderr)
+        return 1
+    df = analyze.assign_sets(analyze.load_lengths(engine, wid))
+    readings = plan_.load_readings(
+        engine, df, __import__("polarswim.patterns", fromlist=["x"]).from_params(
+            db.load_model_params(engine)))
+    print(plan_.describe(df, plan_.parse_plan(text), readings[wid]))
     return 0
 
 
@@ -347,6 +383,16 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--no-open", action="store_true",
                     help="serve without opening a browser window")
     up.set_defaults(func=cmd_up)
+
+    pl = sub.add_parser("plan", help="read a swim against its written workout")
+    pl.add_argument("workout", metavar="date|id|latest",
+                    help="e.g. 2026-09-25, a Polar training id, or 'latest'")
+    pl.add_argument("file", nargs="?", default=None,
+                    help="the workout as a .txt or .pdf; `#` skips a line")
+    pl.add_argument("--show", action="store_true",
+                    help="print the stored plan's alignment (the default without a file)")
+    pl.add_argument("--clear", action="store_true", help="forget the stored plan")
+    pl.set_defaults(func=cmd_plan)
 
     rs = sub.add_parser("reparse", help="re-run the parser over stored payloads")
     rs.set_defaults(func=cmd_reparse)

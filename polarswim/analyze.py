@@ -828,25 +828,35 @@ def analyze(engine: Engine, workout_id: int | None = None,
     if df.empty:
         return AnalysisResult()
 
+    # A written workout, where the swimmer supplied one, re-cuts reps and sets
+    # along the plan before anything is computed from them. See `plan`.
+    from . import plan as plan_
+    from . import patterns as pat
+    prior_ratios = pat.from_params(db.load_model_params(engine))
     df = assign_sets(df)
+    readings = plan_.load_readings(engine, df, prior_ratios)
+    df = plan_.restructure(df, readings)
     hr = load_hr(engine, sorted(df["workout_id"].unique().tolist()))
     df = add_features(df, hr)
 
     # Repair first, then classify. An uncorrected merge carries a doubled time and
     # would be classified on a pace nobody swam, which is the whole reason the
     # correction has to land before the classifier sees the data.
-    repairs = detect_repairs(df)
+    repairs = plan_.merge_repairs(detect_repairs(df), plan_.repairs(readings, df))
     df = apply_repairs(df, repairs)
 
     # Learn from the whole history so a single-workout run still uses good
     # estimates, then classify only what was asked for.
     if workout_id is None:
-        full = df
+        full, full_readings = df, readings
     else:
         full = assign_sets(load_lengths(engine))
+        full_readings = plan_.load_readings(engine, full, prior_ratios)
+        full = plan_.restructure(full, full_readings)
         full = add_features(
             full, load_hr(engine, sorted(full["workout_id"].unique().tolist())))
-        full = apply_repairs(full, detect_repairs(full))
+        full = apply_repairs(full, plan_.merge_repairs(
+            detect_repairs(full), plan_.repairs(full_readings, full)))
     params = learn_params(full)
     df = classify(df, params)
 
@@ -858,7 +868,6 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # The per-stroke reference is learned from the whole history for the same
     # reason the pace thresholds are: a single workout rarely contains enough
     # medleys to measure four strokes against each other.
-    from . import patterns as pat
     ratios = pat.learn_ratios(full)
     params.update(pat.as_params(ratios))
 
@@ -867,8 +876,11 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # `model_params` so every later view loads it instead of refitting.
     from . import learn
     labels = db.load_labels(engine)
-    if labels:
-        fitted = learn.fit(full if workout_id is None else df, labels)
+    # A planned stroke is ground truth for training too; a hand correction wins
+    # where both exist.
+    training = {**plan_.labels(full_readings), **labels}
+    if training:
+        fitted = learn.fit(full if workout_id is None else df, training)
         if fitted.is_usable():
             params.update(fitted.as_params())
             df = learn.apply(df, fitted)
@@ -883,6 +895,7 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # After every automatic step and before the swimmer's own word: a rep is one
     # stroke, but a correction may say otherwise and must still win.
     df = enforce_rep_consistency(df)
+    df = plan_.apply_labels(df, plan_.labels(readings))
     df = learn.apply_labels(df, labels)
 
     kinds = {(r.workout_id, r.idx): r.kind for r in repairs}

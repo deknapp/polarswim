@@ -42,15 +42,21 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     df = analyze.load_lengths(engine, workout_id)
     if df.empty:
         return df
+    from . import db
+    from . import plan as plan_
+    from . import patterns as pat
+    stored = db.load_model_params(engine)
     df = analyze.assign_sets(df)
+    readings = plan_.load_readings(engine, df, pat.from_params(stored))
+    df = plan_.restructure(df, readings)
     hr = analyze.load_hr(engine, sorted(df["workout_id"].unique().tolist()))
     df = analyze.add_features(df, hr)
     # Repairs are applied here too, so the card, the image and the web UI all
     # describe the swim with the same corrected paces the classifier used.
-    df = analyze.apply_repairs(df, analyze.detect_repairs(df))
+    df = analyze.apply_repairs(df, plan_.merge_repairs(
+        analyze.detect_repairs(df), plan_.repairs(readings, df)))
     if params is None:
-        from . import db
-        params = db.load_model_params(engine) or analyze.learn_params(df)
+        params = stored or analyze.learn_params(df)
     df = analyze.classify(df, params)
     df = analyze.label_im(df, analyze.detect_im(df))
 
@@ -58,7 +64,7 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     # rules; the swimmer's corrections outrank everything, including the model
     # that was trained on them. The model is loaded, not fitted — fitting happens
     # once, in `analyze`, over every labelled length there is.
-    from . import db, learn
+    from . import learn
     model = learn.from_params(params)
     if model.is_usable():
         df = learn.apply(df, model)
@@ -73,6 +79,7 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     df = pat.label_patterns(df, pat.detect_patterns(df, ratios))
 
     df = analyze.enforce_rep_consistency(df)
+    df = plan_.apply_labels(df, plan_.labels(readings))
     return learn.apply_labels(df, db.load_labels(engine, workout_id))
 
 

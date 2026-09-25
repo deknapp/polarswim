@@ -152,5 +152,15 @@ predictions = Table(
     Index("idx_predictions_class", "predicted"),
 )
 
+# The written workout, as the swimmer supplied it. Kept as text rather than parsed
+# rows so a better parser re-reads every stored plan with no re-entry.
+plans = Table(
+    "plans", metadata,
+    Column("workout_id", Integer, ForeignKey("workouts.id", ondelete="CASCADE"),
+           primary_key=True, autoincrement=False),
+    Column("text", Text, nullable=False),
+    Column("updated_at", String(32), nullable=False),
+)
+
 ALL_TABLES = (workouts, lengths, hr_samples, raw_payloads,
-              sync_runs, model_params, predictions, labels)
+              sync_runs, model_params, predictions, labels, plans)

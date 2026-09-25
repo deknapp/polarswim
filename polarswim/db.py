@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from .models import (ALL_TABLES, hr_samples, labels, lengths, metadata,
+from .models import (ALL_TABLES, hr_samples, labels, lengths, metadata, plans,
                      model_params, predictions, raw_payloads, sync_runs, workouts)
 from .parse import Workout
 
@@ -302,6 +302,29 @@ def load_labels(engine: Engine, workout_id: int | None = None) -> dict:
         stmt = stmt.where(labels.c.workout_id == workout_id)
     with engine.connect() as c:
         return {(r.workout_id, r.idx): r.stroke for r in c.execute(stmt)}
+
+
+# --- workout plans -----------------------------------------------------------
+def save_plan(engine: Engine, workout_id: int, text: str) -> None:
+    """Store the written workout for one swim, replacing any earlier one."""
+    with engine.begin() as c:
+        c.execute(sa.delete(plans).where(plans.c.workout_id == workout_id))
+        c.execute(sa.insert(plans).values(workout_id=workout_id, text=text,
+                                          updated_at=now_iso()))
+
+
+def clear_plan(engine: Engine, workout_id: int) -> int:
+    with engine.begin() as c:
+        return c.execute(sa.delete(plans).where(plans.c.workout_id == workout_id)).rowcount
+
+
+def load_plans(engine: Engine, workout_ids: list[int] | None = None) -> dict[int, str]:
+    """Stored plans as {workout_id: text}."""
+    stmt = sa.select(plans.c.workout_id, plans.c.text)
+    if workout_ids is not None:
+        stmt = stmt.where(plans.c.workout_id.in_(workout_ids))
+    with engine.connect() as c:
+        return {r.workout_id: r.text for r in c.execute(stmt)}
 
 
 def label_counts(engine: Engine) -> dict[str, int]:

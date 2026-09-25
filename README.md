@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 432 tests, no network
+.venv/bin/pytest -q                                # 440 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -398,6 +398,48 @@ being assigned a coin-flip label.
 written to `model_params`, so they tighten as workouts are synced. Keeping the model
 in the database rather than a pickle makes it inspectable and diffable.
 
+## Reading a swim against its written workout
+
+Lap times and heart rate barely identify a stroke — this swimmer's back and
+breast both run about 1.33x freestyle pace, and a tired freestyle 50 looks like
+either. Polar's splits are also the only timing there is, and on a shared lane
+they go wrong in ways no rule can undo alone: stopping short of the wall, a turn
+placed late, a 200 broken by traffic. Polar sends no cadence, stroke count or
+speed for an arm-worn sensor (the payload's `CADENCE` and `SPEED` are null and
+`strokes` is 0), so there is nothing else to re-split from.
+
+A written workout turns the problem into alignment. Give it the plan — the
+coach's PDF or a pasted `.txt` — with `#` in front of any line you did not swim:
+
+```bash
+polarswim plan 2026-09-25 ~/Desktop/workout.pdf
+polarswim plan 2026-09-25 --show
+polarswim plan 2026-09-25 --clear
+```
+
+A dynamic program matches each planned swim to a run of Polar lengths, scoring
+rest boundaries (a swim starts where you stopped; a short traffic stop inside
+one is cheap, a two-minute one is not), Polar's length count, pace against what
+that stroke costs you relative to the day's freestyle, the send-off intervals,
+and heart rate for the two swims where it is unambiguous: fly is the most
+expensive thing in a practice and an EZ swim the cheapest. Lengths before the
+plan starts and after it ends stay unplanned and go back to the classifier.
+
+The alignment then does three things:
+
+- **Stroke.** The planned stroke outranks every inference and loses only to a
+  hand correction. "Choice" swims are left to the classifier.
+- **Structure.** Each planned swim is one rep and each plan line one set, so
+  the card reads like the workout.
+- **Splits.** Where the lengths of one swim disagree by more than 1.25x — a
+  28.8 s length then an 18.4 s one — the swim's time is spread evenly across
+  its lengths. Its total is kept; only Polar's division of it is replaced.
+  Where Polar counted fewer lengths than planned and none of them is a doubled
+  length, you swam less than the plan said, and nothing is invented.
+
+Planned strokes also train the correction model, so a few planned workouts
+improve the classifier on days without one.
+
 ## Corrections, and the model they train
 
 Corrections are a **sub-tab of the workout**, beside its analysis — they are a
@@ -501,6 +543,7 @@ clarify.
 | `db` | Idempotent upserts, transactional loads, additive schema migration |
 | `sync` | Discover, skip stored, fetch, parse, load |
 | `analyze` | Sets, turn-defect repair, features, classification, medley detection, learned parameters |
+| `plan` | Aligns a swim to its written workout: stroke, reps and sets, and re-splits Polar's impossible splits |
 | `learn` | Fits a stroke model to the swimmer's corrections, and reports held-out accuracy |
 | `render` | Unicode cards |
 | `report` | pandas aggregation over a date range |

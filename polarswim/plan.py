@@ -1,0 +1,556 @@
+"""Read a workout against the plan the swimmer was given.
+
+From lap times and heart rate alone, stroke is barely identifiable — this
+swimmer's backstroke and breaststroke both run about 1.33x freestyle pace, and a
+tired freestyle 50 is indistinguishable from either. Polar's per-length splits
+are the only timing there is, and on a crowded lane they are wrong in ways no
+rule can undo on its own: stopping short of the wall, a turn placed late, a
+200 broken by traffic.
+
+A written workout changes the problem. `5 x 50 Free @1:10` says how many swims,
+how far, which stroke and roughly when each one started, so the question is no
+longer "what stroke is this length" but "which planned swim is this length part
+of" — an alignment problem, and one the data can answer well, because the
+structure (rests, distances, send-offs) carries most of the information that
+pace and heart rate cannot.
+
+The alignment is a dynamic program over lengths x planned swims. Each planned
+swim claims a contiguous run of Polar lengths, and the path is scored on:
+
+  * count   — claiming more or fewer lengths than the distance needs. Allowed,
+              because Polar does miss and invent walls, but it costs.
+  * rest    — a swim should begin where the swimmer stopped. Starting one in
+              the middle of an unbroken run is expensive; a stop in the middle
+              of a swim (traffic, a short wall) is cheap, since it happens.
+  * pace    — the swim's pace against what that stroke costs this swimmer, as a
+              multiple of the day's own freestyle. Deliberately soft: pace is
+              the weak signal here, and it only has to break ties.
+  * send-off — swim time plus the rest after it, against the nearest of the
+              listed intervals. Loose, because a shared lane is loose.
+
+Lengths that fit no planned swim are left unplanned (warm-up before the plan
+started, "random stuff" after it) and go back to the ordinary classifier, as
+does any swim written as "choice".
+
+What the alignment is used for:
+
+  1. Stroke.  A planned stroke is the swimmer's own word about the swim, so it
+     outranks every inference — and ranks below only a hand correction.
+  2. Structure.  Each planned swim becomes one rep and each plan line one set,
+     so a 200 broken by traffic still reads as a 200, and the card mirrors the
+     written workout.
+  3. Splits.  Where Polar's turn points are visibly wrong inside one swim — a
+     28.8 s length followed by an 18.4 s one, which is a misplaced wall or a
+     short finish rather than a swimmer changing speed by half — the swim's
+     time is spread evenly across its lengths. The swim's total is kept; only
+     the per-length division, which is the part Polar got wrong, is replaced.
+     Where Polar's length COUNT is wrong, every length is rescaled so the swim
+     covers the distance the plan says it did.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+REFERENCE_LENGTH_M = 22.86
+
+# Pace as a multiple of the day's freestyle reference (the 15th percentile of the
+# day's lengths). Freestyle sits a little above 1.0 because the reference is the
+# fast end of the day. The three strokes are overridden by the swimmer's own
+# learned medley ratios when those exist.
+EXPECTED_RATIO = {
+    "freestyle": 1.08, "butterfly": 1.28, "backstroke": 1.34,
+    "breaststroke": 1.33, "kick": 1.55, "drill": 1.30, None: 1.12,
+}
+# How much the ratio may wander, in log units. Kick and "choice" are wide on
+# purpose: a fast kick and an easy kick differ enormously, and a choice swim
+# could be anything.
+PACE_SIGMA = {"kick": 0.22, None: 0.25}
+DEFAULT_SIGMA = 0.14
+EASY_FACTOR = 1.10               # an EZ swim runs about a tenth slower
+
+# Costs, in units where one pace standard deviation squared costs 0.5.
+COST_UNPLANNED = 2.0             # per length left out of the plan, mid-workout
+# Before the plan starts and after it ends, unplanned swimming is normal — the
+# swimmer arrived late, or added "random stuff" at the end. Charging those
+# lengths the full price made the aligner stretch planned swims over them.
+COST_UNPLANNED_EDGE = 0.3
+# Per planned length the swimmer did not swim. Dearer than a miscounted length:
+# a swimmer who says they did the workout is more likely right than the sensor.
+COST_SKIP_SWIM = 5.0
+COST_COUNT = 2.5                 # per length claimed beyond/short of the distance
+COST_START_MIDSWIM = 3.0         # a swim beginning where the swimmer did not stop
+COST_BROKEN = 0.6                # a stop inside a swim (traffic, short wall)
+# ...and a long one is not a traffic stop. Beyond this, each second costs, so a
+# 200 is never stretched across a two-minute rest.
+BROKEN_FREE_S = 20.0
+COST_BROKEN_PER_S = 0.08
+COST_SENDOFF = 0.04              # per second outside the send-off tolerance
+SENDOFF_TOLERANCE_S = 8.0
+# Heart rate, used for the two swims where it is unambiguous: butterfly is the
+# most expensive thing in a practice, and an EZ swim is the cheapest. Scored on
+# the swim's heart-rate percentile within the day, so fitness and drift cancel.
+COST_HR = 4.0
+FLY_HR_PCT = 0.55                # fly below this percentile starts to cost
+EASY_HR_PCT = 0.50               # an EZ swim above it starts to cost
+HR_LAG_S = 15
+REST_GAP_S = 2.0                 # same boundary `analyze` uses
+
+# A swim is re-split only when its lengths disagree by more than this ratio. The
+# history's 50s split 1.06 : 1 on the median, so this is far outside ordinary
+# pacing; 28.8 / 18.4 = 1.57 is what it is there to catch.
+RESPLIT_RATIO = 1.25
+
+
+# --- parsing ----------------------------------------------------------------
+@dataclass
+class Swim:
+    """One planned swim: a distance of one stroke, started on its own."""
+    yards: int
+    stroke: str | None            # None = choice / unspecified
+    line_no: int                  # which plan line it came from; one set per line
+    text: str                     # the line, for display
+    easy: bool = False
+    intervals: list[float] = field(default_factory=list)
+    joined: bool = False          # may run straight into the next swim (25 kick + 50 swim)
+    last_of_line: bool = False
+
+
+_STROKE_WORDS = (
+    (r"\bkick", "kick"),
+    (r"\bdrill", "drill"),
+    (r"\b(?:fly|butterfly)\b", "butterfly"),
+    (r"\bback(?:stroke)?\b", "backstroke"),
+    (r"\bbreast(?:stroke)?\b", "breaststroke"),
+    (r"\b(?:free|freestyle)\b", "freestyle"),
+    (r"\bIM\b", "IM"),
+)
+
+
+def _stroke_of(text: str) -> str | None:
+    """The stroke a fragment names. Kick first: `Kick: Odd Back/Even Breast` is kick."""
+    for pat, name in _STROKE_WORDS:
+        if re.search(pat, text, flags=re.I):
+            return name
+    return None
+
+
+def _clock(s: str) -> float:
+    """`1:10` -> 70, `:55` -> 55."""
+    m, _, sec = s.rpartition(":")
+    return float(m or 0) * 60 + float(sec)
+
+
+_INTERVALS = re.compile(r"@\s*((?:\d*:\d{2})(?:\s*/\s*\d*:\d{2})*)")
+_REPEAT = re.compile(r"^\s*(\d+)\s*[x×]\s*(.*)$", re.I)
+_DIST = re.compile(r"^\s*(\d{2,4})\b\s*(.*)$")
+
+
+def _pieces(body: str) -> list[tuple[int, str]]:
+    """`(25 Fast Kick + 50 Fast Swim Free)` -> [(25, 'Fast Kick'), (50, '...')]."""
+    body = body.strip()
+    if body.startswith("("):
+        body = body[1:body.index(")")] if ")" in body else body[1:]
+    out = []
+    for part in body.split("+"):
+        m = _DIST.match(part)
+        if m:
+            out.append((int(m.group(1)), m.group(2)))
+    return out
+
+
+def parse_plan(text: str) -> list[Swim]:
+    """The swims a written workout asks for, in order.
+
+    Understands the way workouts are written on a whiteboard: `5 x 50 Free
+    @1:00/1:10/1:15`, `300 Swim`, `4 x (25 Kick + 50 Swim)`, `1 x 200 EZ Choice`.
+    Headings, set totals like `(900)` and anything else are ignored. A line the
+    swimmer did not do is removed by starting it with `#`.
+    """
+    swims: list[Swim] = []
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        intervals = []
+        m = _INTERVALS.search(line)
+        if m:
+            intervals = [_clock(x) for x in re.split(r"\s*/\s*", m.group(1))]
+            line_wo = line[:m.start()]
+        else:
+            line_wo = line
+        line_wo = re.sub(r"\(\s*\d+(?:\s*/\s*\d+)*\s*\)\s*$", "", line_wo).strip()
+
+        rm = _REPEAT.match(line_wo)
+        reps, body = (int(rm.group(1)), rm.group(2)) if rm else (1, line_wo)
+        pieces = _pieces(body)
+        if not pieces:
+            continue
+        before = len(swims)
+        for _ in range(reps):
+            for i, (yards, desc) in enumerate(pieces):
+                swims.append(Swim(
+                    yards=yards, stroke=_stroke_of(desc), line_no=line_no,
+                    text=line, easy=bool(re.search(r"\b(?:EZ|easy)\b", desc, re.I)),
+                    intervals=intervals, joined=i < len(pieces) - 1))
+        if len(swims) > before:
+            swims[-1].last_of_line = True
+    return swims
+
+
+def read_plan_file(path: str | Path) -> str:
+    """Plan text from a .txt, or from a PDF via poppler's `pdftotext`."""
+    path = Path(path).expanduser()
+    if path.suffix.lower() == ".pdf":
+        try:
+            return subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                                  check=True, capture_output=True, text=True).stdout
+        except FileNotFoundError as e:
+            raise RuntimeError("reading a PDF needs `pdftotext` (brew install poppler); "
+                               "or paste the workout into a .txt file") from e
+    return path.read_text()
+
+
+# --- alignment --------------------------------------------------------------
+@dataclass
+class Segment:
+    """A run of Polar lengths and the planned swim it was matched to, if any."""
+    swim_no: int | None           # index into the plan, None = unplanned
+    idxs: list[int]
+
+
+def _expected_ratio(swim: Swim, ratios: dict[str, float]) -> tuple[float, float]:
+    base = ratios.get(swim.stroke) or EXPECTED_RATIO.get(swim.stroke, 1.12)
+    if swim.stroke == "IM":
+        base = float(np.mean([ratios.get(s, EXPECTED_RATIO[s]) for s in
+                              ("butterfly", "backstroke", "breaststroke", "freestyle")]))
+    if swim.easy:
+        base *= EASY_FACTOR
+    return base, PACE_SIGMA.get(swim.stroke, DEFAULT_SIGMA)
+
+
+def _hr_means(start: np.ndarray, end: np.ndarray, hr: np.ndarray | None) -> np.ndarray:
+    """Mean heart rate over each length, shifted by the cardiac lag."""
+    out = np.full(len(start), np.nan)
+    if hr is None or len(hr) < 60:
+        return out
+    for i, (a, b) in enumerate(zip(start, end)):
+        seg = hr[min(int(a) + HR_LAG_S, len(hr) - 1):min(int(b) + HR_LAG_S + 5, len(hr))]
+        if len(seg):
+            out[i] = float(seg.mean())
+    return out
+
+
+def align(g: pd.DataFrame, swims: list[Swim],
+          ratios: dict[str, float] | None = None,
+          hr: np.ndarray | None = None) -> list[Segment]:
+    """Match one workout's lengths to its plan. `g` is one workout, idx order.
+
+    The DP state also carries whether the previous swim was a joined one (the
+    `25 kick` of `25 kick + 50 swim`), because only then may the next swim start
+    without a stop in front of it.
+    """
+    ratios = ratios or {}
+    g = g.sort_values("idx")
+    idx = g["idx"].to_numpy()
+    start = g["start_offset_s"].to_numpy(dtype=float)
+    dur = g["duration_s"].to_numpy(dtype=float)
+    end = start + dur
+    n, m = len(g), len(swims)
+    pool_m = float(g["pool_m"].iloc[0])
+    pool_yd = pool_m / 0.9144
+    norm = REFERENCE_LENGTH_M / pool_m
+
+    gap_before = np.r_[np.inf, start[1:] - end[:-1]]
+    rest_start = gap_before > REST_GAP_S           # length i begins after a stop
+    rest_after = np.r_[start[1:] - end[:-1], np.inf]
+    free_ref = float(np.percentile(dur * norm, 15))
+    csum = np.r_[0.0, np.cumsum(dur)]
+    stops = np.r_[0, np.cumsum(rest_start[1:].astype(int))]   # stops before i
+    hr_len = _hr_means(start, end, hr)
+    hr_ok = np.isfinite(hr_len)
+    hr_sorted = np.sort(hr_len[hr_ok])
+
+    def hr_pct(i: int, k: int) -> float | None:
+        v = hr_len[i:i + k][hr_ok[i:i + k]]
+        if not len(v) or not len(hr_sorted):
+            return None
+        return float(np.searchsorted(hr_sorted, v.mean())) / len(hr_sorted)
+
+    def swim_cost(j: int, i: int, k: int) -> float:
+        s = swims[j]
+        want = max(1, int(round(s.yards / pool_yd)))
+        c = COST_COUNT * abs(k - want)
+        # stops strictly inside the claimed run, dearer the longer they were
+        for t in range(i + 1, i + k):
+            if rest_start[t]:
+                c += COST_BROKEN + COST_BROKEN_PER_S * max(0.0, gap_before[t] - BROKEN_FREE_S)
+        # pace per planned length, so a missed wall does not read as slow swimming
+        pace = (csum[i + k] - csum[i]) / want * norm
+        exp, sigma = _expected_ratio(s, ratios)
+        z = math.log(pace / (free_ref * exp)) / sigma
+        c += 0.5 * min(z * z, 16.0)
+        pct = hr_pct(i, k) if (s.stroke == "butterfly" or s.easy) else None
+        if pct is not None:
+            if s.stroke == "butterfly":
+                c += COST_HR * max(0.0, FLY_HR_PCT - pct)
+            if s.easy:
+                c += COST_HR * max(0.0, pct - EASY_HR_PCT)
+        if s.intervals and not s.last_of_line and np.isfinite(rest_after[i + k - 1]):
+            cycle = (end[i + k - 1] - start[i]) + rest_after[i + k - 1]
+            off = min(abs(cycle - iv) for iv in s.intervals)
+            c += COST_SENDOFF * max(0.0, off - SENDOFF_TOLERANCE_S)
+        return c
+
+    INF = float("inf")
+    # best[i, j, f]: first i lengths and first j swims accounted for; f = 1 when
+    # the last move was a joined swim, so the next may start mid-swim.
+    best = np.full((n + 1, m + 1, 2), INF)
+    back: dict[tuple[int, int, int], tuple[int, int, int, str]] = {}
+    best[0, 0, 0] = 0.0
+
+    def relax(key, v, prev):
+        if v < best[key]:
+            best[key] = v
+            back[key] = prev
+
+    for i in range(n + 1):
+        for j in range(m + 1):
+            for f in (0, 1):
+                b = best[i, j, f]
+                if b == INF:
+                    continue
+                if j < m:                       # the swimmer skipped swim j
+                    want = max(1, int(round(swims[j].yards / pool_yd)))
+                    relax((i, j + 1, 0), b + COST_SKIP_SWIM * want, (i, j, f, "skip"))
+                if i == n:
+                    continue
+                edge = j == 0 or j == m
+                relax((i + 1, j, 0), b + (COST_UNPLANNED_EDGE if edge else COST_UNPLANNED),
+                      (i, j, f, "free"))
+                if j == m:
+                    continue
+                s_j = swims[j]
+                want = max(1, int(round(s_j.yards / pool_yd)))
+                spread = 1 if want < 8 else 2
+                boundary = 0.0 if (rest_start[i] or f) else COST_START_MIDSWIM
+                nf = 1 if s_j.joined else 0
+                for k in range(max(1, want - spread), want + spread + 1):
+                    if i + k > n:
+                        break
+                    # a joined swim must hand over mid-run, not at a stop
+                    if s_j.joined and i + k < n and rest_start[i + k]:
+                        pen = COST_BROKEN
+                    else:
+                        pen = 0.0
+                    relax((i + k, j + 1, nf), b + boundary + pen + swim_cost(j, i, k),
+                          (i, j, f, "swim"))
+
+    segs: list[Segment] = []
+    key = (n, m, int(np.argmin(best[n, m])))
+    while key != (0, 0, 0):
+        pi, pj, pf, kind = back[key]
+        i = key[0]
+        if kind == "swim":
+            segs.append(Segment(pj, [int(x) for x in idx[pi:i]]))
+        elif kind == "free":
+            segs.append(Segment(None, [int(idx[pi])]))
+        key = (pi, pj, pf)
+    segs.reverse()
+    # Merge consecutive unplanned lengths into one segment per unbroken run.
+    out: list[Segment] = []
+    for s in segs:
+        if (s.swim_no is None and out and out[-1].swim_no is None):
+            out[-1].idxs.extend(s.idxs)
+        else:
+            out.append(s)
+    return out
+
+
+# --- applying ---------------------------------------------------------------
+@dataclass
+class PlanReading:
+    """What the plan says about each length of one workout."""
+    stroke: dict[int, str]            # idx -> stroke, where the plan names one
+    factor: dict[int, float]          # idx -> real lengths this record covers
+    kind: dict[int, str]              # idx -> 'resplit'
+    rep_of: dict[int, int]            # idx -> rep number (one per planned swim)
+    set_of: dict[int, int]            # idx -> set number (one per plan line)
+    label: dict[int, str]             # idx -> the plan line
+    segments: list[Segment]
+
+
+def read(g: pd.DataFrame, swims: list[Swim],
+         ratios: dict[str, float] | None = None,
+         hr: np.ndarray | None = None) -> PlanReading:
+    segs = align(g, swims, ratios, hr)
+    g = g.set_index("idx")
+    pool_yd = float(g["pool_m"].iloc[0]) / 0.9144
+    stroke, factor, kind, rep_of, set_of, label = {}, {}, {}, {}, {}, {}
+
+    rep = 0
+    set_no = 0
+    prev_key = object()
+    for seg in segs:
+        if seg.swim_no is None:
+            # Unplanned: keep the rest structure the data shows.
+            prev_rest = None
+            for i in seg.idxs:
+                if prev_rest is None or g.at[i, "rest_before_s"] > REST_GAP_S:
+                    rep += 1
+                rep_of[i] = rep
+                prev_rest = g.at[i, "rest_before_s"]
+                key = ("free", g.at[i, "set_id"])
+                if key != prev_key:
+                    set_no += 1
+                    prev_key = key
+                set_of[i] = set_no
+            continue
+
+        s = swims[seg.swim_no]
+        rep += 1
+        key = ("plan", s.line_no)
+        if key != prev_key:
+            set_no += 1
+            prev_key = key
+        want = max(1, int(round(s.yards / pool_yd)))
+        d = g.loc[seg.idxs, "duration_s"].to_numpy(dtype=float)
+        # Even split: each record covers (its time / the swim's mean length time)
+        # real lengths, which divides the swim's time evenly and still sums to the
+        # distance the plan says was swum.
+        per_length = d.sum() / want
+        # Re-split only when Polar's count agrees with the plan. When it does not,
+        # every record here was a normal single length (a fused one would sit near
+        # twice the others and `analyze` repairs it on its own), so the swimmer
+        # simply swam a different distance — a 200 cut to 150 in traffic — and
+        # rescaling would invent yards nobody swam.
+        lopsided = (len(d) == want and len(d) > 1
+                    and d.max() / d.min() > RESPLIT_RATIO)
+        for i, t in zip(seg.idxs, d):
+            rep_of[i] = rep
+            set_of[i] = set_no
+            label[i] = s.text
+            if s.stroke == "IM":
+                leg = seg.idxs.index(i) * 4 // len(seg.idxs)
+                stroke[i] = ("butterfly", "backstroke", "breaststroke", "freestyle")[leg]
+            elif s.stroke is not None:
+                stroke[i] = s.stroke
+            if lopsided and s.stroke != "IM":
+                factor[i] = float(t / per_length)
+                kind[i] = "resplit"
+    return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs)
+
+
+def restructure(df: pd.DataFrame, readings: dict[int, PlanReading]) -> pd.DataFrame:
+    """Re-cut reps and sets along the plan, for every workout that has one.
+
+    Reps become planned swims and sets become plan lines. Unplanned stretches
+    keep the structure the rests imply. Numbers are rewritten for the whole
+    workout so rep and set ids stay unique and in time order.
+    """
+    if not readings:
+        return df
+    df = df.copy()
+    for wid, r in readings.items():
+        rows = df["workout_id"] == wid
+        df.loc[rows, "rep_id"] = [r.rep_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
+        df.loc[rows, "set_id"] = [r.set_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
+    df["rep_lengths"] = df.groupby(["workout_id", "rep_id"])["idx"].transform("size")
+    return df
+
+
+def repairs(readings: dict[int, PlanReading], df: pd.DataFrame) -> list:
+    """The plan's split corrections, as the `Repair` records `analyze` applies."""
+    from .analyze import Repair
+    out = []
+    pace = {(int(w), int(i)): float(p) for w, i, p in
+            zip(df["workout_id"], df["idx"], df["pace_s"])}
+    for wid, r in readings.items():
+        for i, f in r.factor.items():
+            out.append(Repair(int(wid), int(i), pace.get((int(wid), int(i)), 0.0),
+                              0.0, f, r.kind[i]))
+    return out
+
+
+def labels(readings: dict[int, PlanReading]) -> dict[tuple[int, int], str]:
+    return {(int(w), int(i)): s for w, r in readings.items() for i, s in r.stroke.items()}
+
+
+def load_readings(engine, df: pd.DataFrame,
+                  ratios: dict[str, float] | None = None) -> dict[int, PlanReading]:
+    """Align every workout in `df` that has a stored plan."""
+    from . import db
+    from .analyze import load_hr
+    plans = db.load_plans(engine, sorted(df["workout_id"].unique().tolist()))
+    hr = load_hr(engine, sorted(plans)) if plans else {}
+    out = {}
+    for wid, text in plans.items():
+        swims = parse_plan(text)
+        g = df[df["workout_id"] == wid]
+        if swims and not g.empty:
+            out[wid] = read(g, swims, ratios, hr.get(wid))
+    return out
+
+
+def apply_labels(df: pd.DataFrame, plan_labels: dict[tuple[int, int], str]) -> pd.DataFrame:
+    """Stamp the planned stroke over every inference.
+
+    The swimmer's own word about the swim, so it outranks the rules, the model,
+    medley detection and rep consistency — and is itself outranked only by a
+    hand correction, which is applied after this.
+    """
+    df = df.copy()
+    if "label_source" not in df.columns:
+        df["label_source"] = "rules"
+    if not plan_labels:
+        return df
+    key = list(zip(df["workout_id"], df["idx"]))
+    hit = [k in plan_labels for k in key]
+    if not any(hit):
+        return df
+    df.loc[hit, "predicted"] = [plan_labels[k] for k in key if k in plan_labels]
+    df.loc[hit, "confidence"] = 0.95
+    df.loc[hit, "label_source"] = "plan"
+    if "pattern" in df.columns:
+        df.loc[hit, "pattern"] = None
+    return df
+
+
+def merge_repairs(generic: list, planned: list) -> list:
+    """The plan's re-splits replace any generic repair on the same length."""
+    taken = {(r.workout_id, r.idx) for r in planned}
+    return [r for r in generic if (r.workout_id, r.idx) not in taken] + planned
+
+
+_SHORT = {"freestyle": "free", "butterfly": "fly", "backstroke": "back",
+          "breaststroke": "breast", "kick": "kick", "drill": "drill", "IM": "IM",
+          None: "choice"}
+
+
+def describe(g: pd.DataFrame, swims: list[Swim], reading: PlanReading) -> str:
+    """The alignment as a table a swimmer can check against their memory."""
+    g = g.set_index("idx")
+    pool_yd = float(g["pool_m"].iloc[0]) / 0.9144
+    lines = []
+    for seg in reading.segments:
+        t = g.loc[seg.idxs, "duration_s"].to_numpy(dtype=float)
+        span = f"{seg.idxs[0]:>3}-{seg.idxs[-1]:<3}"
+        if seg.swim_no is None:
+            name = "(not in the plan)"
+        else:
+            s = swims[seg.swim_no]
+            name = f"{s.yards} {_SHORT.get(s.stroke, s.stroke)}{' EZ' if s.easy else ''}"
+            want = max(1, int(round(s.yards / pool_yd)))
+            if len(seg.idxs) != want:
+                name += f"  [Polar: {len(seg.idxs)} lengths]"
+        fixed = " re-split" if any(i in reading.factor for i in seg.idxs) else ""
+        lines.append(f"{span} {name:<34} {t.sum():6.1f}s  "
+                     + " ".join(f"{x:.1f}" for x in t) + fixed)
+    return "\n".join(lines)
