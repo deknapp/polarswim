@@ -876,9 +876,10 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # `model_params` so every later view loads it instead of refitting.
     from . import learn
     labels = db.load_labels(engine)
-    # A planned stroke is ground truth for training too; a hand correction wins
+    # A planned stroke is ground truth for training too, once there is enough of
+    # it to be balanced (see `plan.training_labels`); a hand correction wins
     # where both exist.
-    training = {**plan_.labels(full_readings), **labels}
+    training = {**plan_.training_labels(full_readings), **labels}
     if training:
         fitted = learn.fit(full if workout_id is None else df, training)
         if fitted.is_usable():

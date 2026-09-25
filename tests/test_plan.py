@@ -112,3 +112,12 @@ def test_plan_round_trips_and_drives_the_analysis(tmp_path, pool_swim_payload):
         got = [r[0] for r in c.execute(sa.select(predictions.c.predicted))]
     assert got.count("butterfly") >= 6          # 8 lengths; the plan claims the 50s
     assert db.clear_plan(engine, w.id) == 1
+
+
+def test_an_unbalanced_plan_does_not_train_the_model():
+    r = plan.PlanReading(stroke={i: "freestyle" for i in range(1, 45)}
+                         | {i: "backstroke" for i in range(45, 53)},
+                         factor={}, kind={}, rep_of={}, set_of={}, label={}, segments=[])
+    assert plan.training_labels({1: r}) == {}
+    r.stroke |= {i: "butterfly" for i in range(53, 61)} | {i: "breaststroke" for i in range(61, 69)}
+    assert len(plan.training_labels({1: r})) == 68

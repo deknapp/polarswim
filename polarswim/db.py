@@ -336,22 +336,21 @@ def label_counts(engine: Engine) -> dict[str, int]:
 
 
 def save_model_params(engine: Engine, params: dict[str, dict[str, float]]) -> None:
-    """Upsert the learned per-class parameters."""
+    """Replace the learned parameters with this run's.
+
+    Replace, not upsert: `analyze` always derives the complete set from the whole
+    history, and an upsert left behind every class a previous run had fitted. A
+    model trained on corrections that were since withdrawn kept being loaded and
+    applied by the card and the web UI, with nothing left in `labels` to explain
+    it.
+    """
     stamp = now_iso()
+    rows = [dict(class_name=cls, param=k, value=float(v), updated_at=stamp)
+            for cls, kv in params.items() for k, v in kv.items()]
     with engine.begin() as c:
-        for cls, kv in params.items():
-            for k, v in kv.items():
-                hit = c.execute(sa.select(model_params.c.value).where(
-                    sa.and_(model_params.c.class_name == cls,
-                            model_params.c.param == k))).scalar()
-                vals = dict(value=float(v), updated_at=stamp)
-                if hit is None:
-                    c.execute(sa.insert(model_params).values(
-                        class_name=cls, param=k, **vals))
-                else:
-                    c.execute(sa.update(model_params).where(sa.and_(
-                        model_params.c.class_name == cls,
-                        model_params.c.param == k)).values(**vals))
+        c.execute(sa.delete(model_params))
+        if rows:
+            c.execute(sa.insert(model_params), rows)
 
 
 def load_model_params(engine: Engine) -> dict[str, dict[str, float]]:

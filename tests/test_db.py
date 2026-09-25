@@ -212,3 +212,11 @@ def test_sync_recognises_a_stored_session_by_its_session_id(engine, pool_swim_pa
     with engine.connect() as conn:
         assert conn.execute(sa.select(sa.func.count())
                             .select_from(raw_payloads)).scalar() == 1
+
+
+def test_model_params_do_not_outlive_the_model(engine):
+    """A class fitted once and then dropped must not keep being loaded."""
+    db.save_model_params(engine, {"_global": {"pace_p50": 26.0},
+                                  "backstroke": {"mu_pace": 31.0}})
+    db.save_model_params(engine, {"_global": {"pace_p50": 26.5}})
+    assert db.load_model_params(engine) == {"_global": {"pace_p50": 26.5}}

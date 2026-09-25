@@ -554,3 +554,22 @@ def describe(g: pd.DataFrame, swims: list[Swim], reading: PlanReading) -> str:
         lines.append(f"{span} {name:<34} {t.sum():6.1f}s  "
                      + " ".join(f"{x:.1f}" for x in t) + fixed)
     return "\n".join(lines)
+
+
+def training_labels(readings: dict[int, PlanReading]) -> dict[tuple[int, int], str]:
+    """Planned strokes fit to train the correction model — or none at all.
+
+    A plan labels whole workouts, and one workout is mostly freestyle: the first
+    planned swim fitted a model on 44 free and 8 back lengths and it re-labelled
+    2,228 lengths across the history, nearly all toward freestyle, erasing every
+    kick and drill set. So planned labels train the model only once they cover
+    all four strokes with a usable number of each. Until then they correct only
+    the workout they describe.
+    """
+    from .learn import MIN_LABELS_PER_CLASS
+    got = labels(readings)
+    counts = pd.Series(list(got.values()), dtype=object).value_counts()
+    strokes = ("freestyle", "backstroke", "breaststroke", "butterfly")
+    if all(counts.get(s, 0) >= MIN_LABELS_PER_CLASS for s in strokes):
+        return got
+    return {}

@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 440 tests, no network
+.venv/bin/pytest -q                                # 442 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -437,8 +437,11 @@ The alignment then does three things:
   Where Polar counted fewer lengths than planned and none of them is a doubled
   length, you swam less than the plan said, and nothing is invented.
 
-Planned strokes also train the correction model, so a few planned workouts
-improve the classifier on days without one.
+Planned strokes also train the correction model — but only once planned
+workouts cover all four strokes with at least eight lengths each. One workout is
+mostly freestyle, and a model fitted to the first plan alone re-labelled 2,228
+lengths of history toward freestyle. Until the gate opens, a plan corrects only
+the workout it describes.
 
 ## Corrections, and the model they train
 
