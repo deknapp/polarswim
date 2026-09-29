@@ -78,6 +78,10 @@ EASY_FACTOR = 1.10               # an EZ swim runs about a tenth slower
 
 # Costs, in units where one pace standard deviation squared costs 0.5.
 COST_UNPLANNED = 2.0             # per length left out of the plan, mid-workout
+# ...but a swim the swimmer forgot to mention is ONE omission, however long it
+# was. At full price per length, a 150 missing from the account cost 12 and the
+# aligner would rather carve it up and put the planned 25s at its start.
+COST_UNPLANNED_CONT = 0.5
 # Before the plan starts and after it ends, unplanned swimming is normal — the
 # swimmer arrived late, or added "random stuff" at the end. Charging those
 # lengths the full price made the aligner stretch planned swims over them.
@@ -110,9 +114,12 @@ RESPLIT_RATIO = 1.25
 
 
 # --- parsing ----------------------------------------------------------------
+IM_ORDER = ("butterfly", "backstroke", "breaststroke", "freestyle")
+
+
 @dataclass
 class Swim:
-    """One planned swim: a distance of one stroke, started on its own."""
+    """One planned swim: a distance started on its own, of one stroke or of legs."""
     yards: int
     stroke: str | None            # None = choice / unspecified
     line_no: int                  # which plan line it came from; one set per line
@@ -121,6 +128,9 @@ class Swim:
     intervals: list[float] = field(default_factory=list)
     joined: bool = False          # may run straight into the next swim (25 kick + 50 swim)
     last_of_line: bool = False
+    # Strokes that change inside the swim, in order: `50 FL/25 BK/25 BR/25 FR`,
+    # `25 swim / 25 drill`. Empty when the swim is one stroke (or an even IM).
+    legs: list[tuple[int, str | None]] = field(default_factory=list)
 
 
 _STROKE_WORDS = (
@@ -130,7 +140,13 @@ _STROKE_WORDS = (
     (r"\bback(?:stroke)?\b", "backstroke"),
     (r"\bbreast(?:stroke)?\b", "breaststroke"),
     (r"\b(?:free|freestyle)\b", "freestyle"),
+    (r"\bpull\b", "freestyle"),          # a pull set is freestyle unless it says otherwise
     (r"\bIM\b", "IM"),
+    # Coaches' shorthand. Case-sensitive, so "fr" inside a word never counts.
+    (r"(?-i:\bFL\b)", "butterfly"),
+    (r"(?-i:\bBK\b)", "backstroke"),
+    (r"(?-i:\bBR\b)", "breaststroke"),
+    (r"(?-i:\bFR\b)", "freestyle"),
 )
 
 
@@ -148,9 +164,48 @@ def _clock(s: str) -> float:
     return float(m or 0) * 60 + float(sec)
 
 
-_INTERVALS = re.compile(r"@\s*((?:\d*:\d{2})(?:\s*/\s*\d*:\d{2})*)")
+# Send-offs are written `@1:10`, `on 2:00/2:15`, or just as a column of clocks.
+_INTERVALS = re.compile(
+    r"(?:(?:@|\bon\b)\s*|(?<=\s))(\d{0,2}:\d{2}(?:\s*/\s*\d{0,2}:\d{2})*)(?!\d)", re.I)
 _REPEAT = re.compile(r"^\s*(\d+)\s*[x×]\s*(.*)$", re.I)
-_DIST = re.compile(r"^\s*(\d{2,4})\b\s*(.*)$")
+# `50`, `50s`, `25's` — the plural is how a coach writes a set of them.
+_DIST = re.compile(r"^\s*(\d{2,4})(?:['’]?s(?![a-z]))?\s*(.*)$", re.I)
+_THRU = re.compile(r"^\s*(\d+)\s*[x×]\s*thr(?:ough|u)\b", re.I)
+_TOTAL = re.compile(r"^\(\s*\d+(?:\s*/\s*\d+)*\s*\)$")
+_TRAILING_TOTAL = re.compile(r"\S.*\(\s*\d{3,}(?:\s*/\s*\d+)*\s*\)\s*$")
+_HEADING = re.compile(r"^[A-Za-z][^:\d]*:\s*(?=\d)")     # `Cool Down: 1 x 200`
+_IMO = re.compile(r"\bIMO\b|\bIM\s+order\b", re.I)
+
+
+def _legs(desc: str, yards: int) -> list[tuple[int, str | None]]:
+    """`50 FL/25 BK/25 BR/25 FR` -> legs, when they add up to the swim.
+
+    Anything that does not sum to the distance is not a leg list — `Kick: Odd
+    Back/Even Breast` also has slashes in it.
+    """
+    desc = desc.lstrip(": ")
+    parts = [p for p in re.split(r"\s*/\s*", desc) if p.strip()]
+    if len(parts) < 2:
+        return []
+    out = []
+    for p in parts:
+        m = _DIST.match(p)
+        if not m:
+            return []
+        out.append((int(m.group(1)), _stroke_of(m.group(2))))
+    return out if sum(y for y, _ in out) == yards else []
+
+
+def _leg_line(line: str) -> list[tuple[int, str | None]]:
+    """A line that is nothing but legs, written under a repeat to spell out each rep."""
+    total = 0
+    parts = [p for p in re.split(r"\s*/\s*", line) if p.strip()]
+    for p in parts:
+        m = _DIST.match(p)
+        if not m or not m.group(2).strip():
+            return []
+        total += int(m.group(1))
+    return _legs(line, total) if len(parts) >= 2 else []
 
 
 def _pieces(body: str) -> list[tuple[int, str]]:
@@ -166,43 +221,112 @@ def _pieces(body: str) -> list[tuple[int, str]]:
     return out
 
 
+def _parse_line(line: str, line_no: int) -> list[Swim]:
+    intervals = []
+    m = _INTERVALS.search(line)
+    if m:
+        intervals = [_clock(x) for x in re.split(r"\s*/\s*", m.group(1))]
+        line_wo = line[:m.start()]
+    else:
+        line_wo = line
+    line_wo = re.sub(r"\(\s*\d+(?:\s*/\s*\d+)*\s*\)\s*$", "", line_wo).strip()
+    line_wo = _HEADING.sub("", line_wo)
+
+    rm = _REPEAT.match(line_wo)
+    reps, body = (int(rm.group(1)), rm.group(2)) if rm else (1, line_wo)
+    pieces = _pieces(body)
+    imo = bool(_IMO.search(line_wo))
+    swims: list[Swim] = []
+    for r in range(reps):
+        # IMO: the reps go fly, back, breast, free — 8 x 50 is two of each.
+        rot = IM_ORDER[r * 4 // reps] if imo and reps >= 4 else None
+        for i, (yards, desc) in enumerate(pieces):
+            stroke = _stroke_of(desc)
+            legs = _legs(desc, yards)
+            if legs:
+                legs = [(y, st if st is not None else rot) for y, st in legs]
+                strokes = {st for _, st in legs}
+                stroke = strokes.pop() if len(strokes) == 1 else None
+            elif stroke is None:
+                stroke = rot
+            swims.append(Swim(
+                yards=yards, stroke=stroke, line_no=line_no,
+                text=line, easy=bool(re.search(r"\b(?:EZ|easy)\b", desc, re.I)),
+                intervals=intervals, joined=i < len(pieces) - 1, legs=legs))
+    if swims:
+        swims[-1].last_of_line = True
+    return swims
+
+
 def parse_plan(text: str) -> list[Swim]:
     """The swims a written workout asks for, in order.
 
     Understands the way workouts are written on a whiteboard: `5 x 50 Free
-    @1:00/1:10/1:15`, `300 Swim`, `4 x (25 Kick + 50 Swim)`, `1 x 200 EZ Choice`.
-    Headings, set totals like `(900)` and anything else are ignored. A line the
-    swimmer did not do is removed by starting it with `#`.
+    @1:00/1:10/1:15`, `300 Swim`, `4 x (25 Kick + 50 Swim)`, `1 x 200 EZ Choice`,
+    `8x50s Drill IMO`, `1x600: 200 Swim/200 Kick/200 Choice`, a `3x125 IM` with
+    one `50 FL/25 BK/25 BR/25 FR` line under it per rep, and `2x thru` over a
+    block. Headings, set totals like `(900)` and anything else are ignored. A
+    line the swimmer did not do is removed by starting it with `#`.
     """
     swims: list[Swim] = []
+    block: list[Swim] | None = None       # the swims of an open `Nx thru`
+    rounds = 1
+    pending: list[Swim] = []              # reps still waiting for their leg line
+
+    def close_block():
+        nonlocal block
+        if block is not None:
+            base = list(block)
+            for _ in range(rounds - 1):
+                swims.extend(Swim(**{**s.__dict__, "legs": list(s.legs),
+                                     "intervals": list(s.intervals)}) for s in base)
+            block = None
+
     for line_no, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        intervals = []
-        m = _INTERVALS.search(line)
-        if m:
-            intervals = [_clock(x) for x in re.split(r"\s*/\s*", m.group(1))]
-            line_wo = line[:m.start()]
-        else:
-            line_wo = line
-        line_wo = re.sub(r"\(\s*\d+(?:\s*/\s*\d+)*\s*\)\s*$", "", line_wo).strip()
-
-        rm = _REPEAT.match(line_wo)
-        reps, body = (int(rm.group(1)), rm.group(2)) if rm else (1, line_wo)
-        pieces = _pieces(body)
-        if not pieces:
+        t = _THRU.match(line)
+        if t:
+            close_block()
+            block, rounds, pending = [], int(t.group(1)), []
             continue
-        before = len(swims)
-        for _ in range(reps):
-            for i, (yards, desc) in enumerate(pieces):
-                swims.append(Swim(
-                    yards=yards, stroke=_stroke_of(desc), line_no=line_no,
-                    text=line, easy=bool(re.search(r"\b(?:EZ|easy)\b", desc, re.I)),
-                    intervals=intervals, joined=i < len(pieces) - 1))
-        if len(swims) > before:
-            swims[-1].last_of_line = True
+        legs = _leg_line(line)
+        if legs and pending and sum(y for y, _ in legs) == pending[0].yards:
+            s = pending.pop(0)
+            s.legs = legs
+            strokes = {st for _, st in legs}
+            s.stroke = strokes.pop() if len(strokes) == 1 else None
+            continue
+        if _HEADING.match(line):              # `Cool Down: 1 x 200` is past the block
+            close_block()
+        if legs:                              # legs on their own: one swim of them
+            got = [Swim(yards=sum(y for y, _ in legs), stroke=None, line_no=line_no,
+                        text=line, legs=legs, last_of_line=True)]
+        else:
+            got = _parse_line(line, line_no)
+        if not got:
+            # A heading or a set total ends a `thru` block; a bullet does not.
+            if block is not None and (_TOTAL.match(line) or line.endswith(":")):
+                close_block()
+            continue
+        pending = [s for s in got if s.stroke == "IM" and not s.legs]
+        swims.extend(got)
+        if block is not None:
+            block.extend(got)
+            if _TRAILING_TOTAL.search(line):  # `1x200 IM 3:00 (3000)` ends the block
+                close_block()
+    close_block()
     return swims
+
+
+def legs_of(s: Swim) -> list[tuple[int, str | None]]:
+    """The swim as legs: its own, an even IM, or one leg of one stroke."""
+    if s.legs:
+        return s.legs
+    if s.stroke == "IM":
+        return [(s.yards // 4, st) for st in IM_ORDER]
+    return [(s.yards, s.stroke)]
 
 
 def read_plan_file(path: str | Path) -> str:
@@ -227,10 +351,9 @@ class Segment:
 
 
 def _expected_ratio(swim: Swim, ratios: dict[str, float]) -> tuple[float, float]:
-    base = ratios.get(swim.stroke) or EXPECTED_RATIO.get(swim.stroke, 1.12)
-    if swim.stroke == "IM":
-        base = float(np.mean([ratios.get(s, EXPECTED_RATIO[s]) for s in
-                              ("butterfly", "backstroke", "breaststroke", "freestyle")]))
+    legs = legs_of(swim)
+    base = sum(y * (ratios.get(st) or EXPECTED_RATIO.get(st, 1.12)) for y, st in legs) \
+        / sum(y for y, _ in legs)
     if swim.easy:
         base *= EASY_FACTOR
     return base, PACE_SIGMA.get(swim.stroke, DEFAULT_SIGMA)
@@ -333,8 +456,19 @@ def align(g: pd.DataFrame, swims: list[Swim],
                 if i == n:
                     continue
                 edge = j == 0 or j == m
-                relax((i + 1, j, 0), b + (COST_UNPLANNED_EDGE if edge else COST_UNPLANNED),
-                      (i, j, f, "free"))
+                # Unplanned swimming, like a planned swim, begins where the swimmer
+                # stopped: cutting a planned swim off mid-run to hand the rest of
+                # the run to "unplanned" is a split nobody swam.
+                last = back.get((i, j, f), (0, 0, 0, ""))[3]
+                cut = (COST_START_MIDSWIM if i and not rest_start[i] and last == "swim"
+                       else 0.0)
+                if edge:
+                    extra = COST_UNPLANNED_EDGE
+                elif i and not rest_start[i] and last == "free":
+                    extra = COST_UNPLANNED_CONT     # the same unplanned swim, going on
+                else:
+                    extra = COST_UNPLANNED
+                relax((i + 1, j, 0), b + cut + extra, (i, j, f, "free"))
                 if j == m:
                     continue
                 s_j = swims[j]
@@ -433,16 +567,24 @@ def read(g: pd.DataFrame, swims: list[Swim],
         # rescaling would invent yards nobody swam.
         lopsided = (len(d) == want and len(d) > 1
                     and d.max() / d.min() > RESPLIT_RATIO)
-        for i, t in zip(seg.idxs, d):
+        legs = legs_of(s)
+        one_stroke = len(legs) == 1
+        # Where each length sits in the swim, in yards: by count when Polar's
+        # count agrees with the plan, else by the share of the swim's time.
+        if len(d) == want:
+            pos = (np.arange(len(d)) + 0.5) / len(d) * s.yards
+        else:
+            pos = (np.cumsum(d) - d / 2) / d.sum() * s.yards
+        bounds = np.cumsum([y for y, _ in legs])
+        for i, t, p in zip(seg.idxs, d, pos):
             rep_of[i] = rep
             set_of[i] = set_no
             label[i] = s.text
-            if s.stroke == "IM":
-                leg = seg.idxs.index(i) * 4 // len(seg.idxs)
-                stroke[i] = ("butterfly", "backstroke", "breaststroke", "freestyle")[leg]
-            elif s.stroke is not None:
-                stroke[i] = s.stroke
-            if lopsided and s.stroke != "IM":
+            leg_stroke = legs[min(int(np.searchsorted(bounds, p, side="right")),
+                                  len(legs) - 1)][1]
+            if leg_stroke is not None:
+                stroke[i] = leg_stroke
+            if lopsided and one_stroke:
                 factor[i] = float(t / per_length)
                 kind[i] = "resplit"
     return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs)
@@ -546,7 +688,9 @@ def describe(g: pd.DataFrame, swims: list[Swim], reading: PlanReading) -> str:
             name = "(not in the plan)"
         else:
             s = swims[seg.swim_no]
-            name = f"{s.yards} {_SHORT.get(s.stroke, s.stroke)}{' EZ' if s.easy else ''}"
+            what = ("/".join(f"{y} {_SHORT.get(st, st)}" for y, st in s.legs)
+                    if s.legs else _SHORT.get(s.stroke, s.stroke))
+            name = f"{s.yards} {what}{' EZ' if s.easy else ''}"
             want = max(1, int(round(s.yards / pool_yd)))
             if len(seg.idxs) != want:
                 name += f"  [Polar: {len(seg.idxs)} lengths]"

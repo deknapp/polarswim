@@ -121,3 +121,75 @@ def test_an_unbalanced_plan_does_not_train_the_model():
     assert plan.training_labels({1: r}) == {}
     r.stroke |= {i: "butterfly" for i in range(53, 61)} | {i: "breaststroke" for i in range(61, 69)}
     assert len(plan.training_labels({1: r})) == 68
+
+
+# The coach's PDF for 2026-09-28, as `pdftotext -layout` gives it.
+TERRIBLE_TUESDAY = """\
+Building 200 IM               "Terrible Tuesday"
+Warm up
+1x600: 200 Swim/200 Kick/200 Choice
+                                               (600)
+Building to a 200 IM:
+8x50s Drill IMO
+  ● 1-1-1 or Single-Arm Fly
+  ● Catch-Up Free
+4x50s 25’sSwim/ 25’s Drill IMO (see above)
+4x50s IMO
+                                             (1400)
+2x thru “floating IMs”:
+3x125 IM                on 2:00/2:15/2:30
+    50 FL/25 BK/25 BR/25 FR
+    25 FL/50 BK/25 BR/25 FR
+    25 FL/25 BK/50 BR/25 FR
+1x25 Swim EZ                        on :45
+                                              (1800)
+2 x thru (no rest between rounds):
+1x200 Negative Split   2:50/3:00/3:10
+1x200 Pull             2:50/3:00/3:10
+1x200 IM               3:00/3:10/3:20        (3000)
+
+Cool Down: 1 x 200                           (3200)
+"""
+
+
+def test_parse_reads_a_coach_pdf_layout():
+    swims = plan.parse_plan(TERRIBLE_TUESDAY)
+    warm = swims[0]
+    assert (warm.yards, warm.legs) == (600, [(200, None), (200, "kick"), (200, None)])
+    drill = swims[1:9]
+    assert all((s.yards, s.stroke) == (50, "drill") for s in drill)   # `50s` is 50
+    swim_drill = swims[9:13]
+    assert [s.legs for s in swim_drill] == [[(25, st), (25, "drill")] for st in plan.IM_ORDER]
+    assert [s.stroke for s in swims[13:17]] == list(plan.IM_ORDER)    # IMO rotates
+    floating = swims[17:21]
+    assert floating[0].legs == [(50, "butterfly"), (25, "backstroke"),
+                                (25, "breaststroke"), (25, "freestyle")]
+    assert floating[2].legs[2] == (50, "breaststroke")
+    assert floating[0].intervals == [120.0, 135.0, 150.0]              # `on 2:00/...`
+    assert floating[3].easy and floating[3].intervals == [45.0]
+    assert [s.yards for s in swims[21:25]] == [125, 125, 125, 25]      # 2x thru
+    assert swims[25].intervals == [170.0, 180.0, 190.0]                # bare clocks
+    assert swims[26].stroke == "freestyle"                             # pull
+    assert [s.yards for s in swims[25:31]] == [200] * 6                # 2x, not 3x
+    assert swims[-1].yards == 200 and swims[-1].line_no == 24          # cool down
+    assert len(swims) == 32
+
+
+def test_legs_name_each_length_of_a_floating_im():
+    swims = plan.parse_plan("1x125 IM\n    25 FL/50 BK/25 BR/25 FR")
+    df = _lengths([[27, 31, 30, 32, 25]])
+    r = plan.read(df, swims)
+    assert [r.stroke[i] for i in range(1, 6)] == [
+        "butterfly", "backstroke", "backstroke", "breaststroke", "freestyle"]
+    assert r.factor == {}                    # a multi-stroke swim is never re-split
+
+
+def test_a_swim_missing_from_the_plan_is_left_whole():
+    """The swimmer forgot a 150 between the 200 and the last two 25s. The
+    aligner must not carve the 150 up to put the 25s at its start."""
+    swims = plan.parse_plan("1x200 Free\n1x25 Breast\n1x25 Free")
+    df = _lengths([[25, 22, 25, 26, 26, 25, 24, 26], [26, 22, 23, 25, 24, 28],
+                   [31], [25]], rest=30)
+    segs = plan.align(df, swims)
+    assert [(s.swim_no, s.idxs) for s in segs] == [
+        (0, list(range(1, 9))), (None, list(range(9, 15))), (1, [15]), (2, [16])]

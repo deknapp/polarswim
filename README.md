@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 442 tests, no network
+.venv/bin/pytest -q                                # 445 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -417,18 +417,27 @@ polarswim plan 2026-09-25 --show
 polarswim plan 2026-09-25 --clear
 ```
 
+The reader takes a coach's layout as written: `8x50s Drill IMO` (the reps
+rotate fly, back, breast, free), `1x600: 200 Swim/200 Kick/200 Choice`,
+`4x50s 25's Swim/25's Drill IMO`, a `3x125 IM` with one `50 FL/25 BK/25 BR/25 FR`
+line under it per rep (a floating IM), `2x thru` over a block, and send-offs
+written `@1:10`, `on 2:00/2:15`, or as a bare column of clocks.
+
 A dynamic program matches each planned swim to a run of Polar lengths, scoring
 rest boundaries (a swim starts where you stopped; a short traffic stop inside
 one is cheap, a two-minute one is not), Polar's length count, pace against what
 that stroke costs you relative to the day's freestyle, the send-off intervals,
 and heart rate for the two swims where it is unambiguous: fly is the most
 expensive thing in a practice and an EZ swim the cheapest. Lengths before the
-plan starts and after it ends stay unplanned and go back to the classifier.
+plan starts and after it ends stay unplanned and go back to the classifier; so
+does a swim in the middle you forgot to write down, which costs as one omission
+however long it was, rather than one per length.
 
 The alignment then does three things:
 
 - **Stroke.** The planned stroke outranks every inference and loses only to a
-  hand correction. "Choice" swims are left to the classifier.
+  hand correction; a swim written in legs names each length by its leg.
+  "Choice" swims are left to the classifier.
 - **Structure.** Each planned swim is one rep and each plan line one set, so
   the card reads like the workout.
 - **Splits.** Where the lengths of one swim disagree by more than 1.25x — a
