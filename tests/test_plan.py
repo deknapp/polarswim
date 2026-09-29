@@ -193,3 +193,8 @@ def test_a_swim_missing_from_the_plan_is_left_whole():
     segs = plan.align(df, swims)
     assert [(s.swim_no, s.idxs) for s in segs] == [
         (0, list(range(1, 9))), (None, list(range(9, 15))), (1, [15]), (2, [16])]
+
+
+def test_imo_can_leave_a_stroke_out():
+    swims = plan.parse_plan("3x50s 25's Swim/25's Drill IMO no fly")
+    assert [s.legs[0][1] for s in swims] == ["backstroke", "breaststroke", "freestyle"]

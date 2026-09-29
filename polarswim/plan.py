@@ -177,6 +177,10 @@ _HEADING = re.compile(r"^[A-Za-z][^:\d]*:\s*(?=\d)")     # `Cool Down: 1 x 200`
 _IMO = re.compile(r"\bIMO\b|\bIM\s+order\b", re.I)
 
 
+_SHORT_NAME = {"butterfly": "fly", "backstroke": "back",
+               "breaststroke": "breast", "freestyle": "free"}
+
+
 def _legs(desc: str, yards: int) -> list[tuple[int, str | None]]:
     """`50 FL/25 BK/25 BR/25 FR` -> legs, when they add up to the swim.
 
@@ -236,10 +240,14 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
     reps, body = (int(rm.group(1)), rm.group(2)) if rm else (1, line_wo)
     pieces = _pieces(body)
     imo = bool(_IMO.search(line_wo))
+    # `IMO no fly`: the rotation without the strokes named after "no".
+    order = [st for st in IM_ORDER if not re.search(
+        r"\bno\s+" + _SHORT_NAME[st] + r"\b", line_wo, re.I)] if imo else []
     swims: list[Swim] = []
     for r in range(reps):
         # IMO: the reps go fly, back, breast, free — 8 x 50 is two of each.
-        rot = IM_ORDER[r * 4 // reps] if imo and reps >= 4 else None
+        rot = (order[r * len(order) // reps]
+               if imo and order and reps >= len(order) else None)
         for i, (yards, desc) in enumerate(pieces):
             stroke = _stroke_of(desc)
             legs = _legs(desc, yards)
