@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 445 tests, no network
+.venv/bin/pytest -q                                # 451 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -452,6 +452,38 @@ mostly freestyle, and a model fitted to the first plan alone re-labelled 2,228
 lengths of history toward freestyle. Until the gate opens, a plan corrects only
 the workout it describes.
 
+## Lengths that were not swimming
+
+Polar counts from the moment the watch starts, and a swimmer does not start
+swimming then. Standing at the wall setting up comes out as "lengths": on
+2026-09-28 the first five went 20, 16, 30, 16 and 15 s at 82-99 bpm, against a
+working heart rate of 116+ once the swim began. A quarter of this history opens
+that way, and every one of those records dragged the day's fast pace, started a
+set of its own, and was classified.
+
+`analyze` finds them at the start of a workout, where two things agree: heart
+rate over the whole run stays more than 10 bpm under the day's working level
+(the 10th percentile across its lengths), and somewhere in it is a "length"
+faster than three-quarters of the day's own fast pace. Either alone describes
+ordinary swimming — every first length is low, because the heart has not caught
+up yet — so it takes both. Mid-workout it does nothing: an impossible record
+between rests there is usually a real length with its wall time misplaced, and
+deleting it would lose yards. Across this history it removes 28 lengths from 11
+workouts.
+
+Anything it misses, name yourself:
+
+```bash
+polarswim exclude 2026-09-28 1-5
+polarswim exclude 2026-09-28 --show
+polarswim exclude 2026-09-28 --clear
+```
+
+Excluded lengths drop out of every view — sets, classification, pace, the card
+— and out of the workout's totals: its distance loses them, and where they came
+first, its clock, average heart rate and time in zone start at the first real
+length. Polar's own record in `lengths` is untouched.
+
 ## Corrections, and the model they train
 
 Corrections are a **sub-tab of the workout**, beside its analysis — they are a
@@ -556,6 +588,7 @@ clarify.
 | `sync` | Discover, skip stored, fetch, parse, load |
 | `analyze` | Sets, turn-defect repair, features, classification, medley detection, learned parameters |
 | `plan` | Aligns a swim to its written workout: stroke, reps and sets, and re-splits Polar's impossible splits |
+| `exclude` | Leaves lengths that were not swimming out of every view and total; the fiddling before a swim is found on its own |
 | `learn` | Fits a stroke model to the swimmer's corrections, and reports held-out accuracy |
 | `render` | Unicode cards |
 | `report` | pandas aggregation over a date range |

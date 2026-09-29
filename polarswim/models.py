@@ -162,5 +162,19 @@ plans = Table(
     Column("updated_at", String(32), nullable=False),
 )
 
+# Lengths that were not swimming: the watch counting "lengths" while the swimmer
+# stood at the wall setting it up. Polar's record stays whole in `lengths`; every
+# view reads around these instead. 'auto' rows are rewritten by each analysis,
+# 'manual' ones only by the swimmer.
+excluded = Table(
+    "excluded", metadata,
+    Column("workout_id", Integer, primary_key=True),
+    Column("idx", Integer, primary_key=True, autoincrement=False),
+    Column("reason", String(8), nullable=False),     # 'auto' | 'manual'
+    Column("excluded_at", String(32), nullable=False),
+    ForeignKeyConstraint(["workout_id", "idx"], ["lengths.workout_id", "lengths.idx"],
+                         ondelete="CASCADE"),
+)
+
 ALL_TABLES = (workouts, lengths, hr_samples, raw_payloads,
-              sync_runs, model_params, predictions, labels, plans)
+              sync_runs, model_params, predictions, labels, plans, excluded)

@@ -32,8 +32,66 @@ def workout_headers(engine: Engine, start: dt.date | None = None,
     if end:
         stmt = stmt.where(workouts.c.start_time <= end.isoformat() + "T23:59:59")
     with engine.connect() as c:
-        return pd.DataFrame(c.execute(
+        heads = pd.DataFrame(c.execute(
             stmt.order_by(workouts.c.start_epoch)).mappings().all())
+    if heads.empty:
+        return heads
+    from . import db
+    trimmed = {w for w, _ in db.load_excluded(engine, heads["id"].tolist())}
+    if not trimmed:
+        return heads
+    return pd.DataFrame([trim_header(engine, r) if r["id"] in trimmed else r
+                         for r in heads.to_dict("records")])
+
+
+def excluded_trim(engine: Engine, workout_id: int) -> dict | None:
+    """What leaving out the lengths that were not swimming takes off a workout.
+
+    `lead_s` is the clock before the first real length, when what filled it was
+    junk: the watch was running but the swim had not started.
+    """
+    from . import db
+    from .models import lengths
+    gone = db.load_excluded(engine, [workout_id])
+    if not gone:
+        return None
+    with engine.connect() as c:
+        rows = c.execute(sa.select(lengths.c.idx, lengths.c.start_offset_s)
+                         .where(lengths.c.workout_id == workout_id)).all()
+    kept = [t for i, t in rows if (workout_id, i) not in gone]
+    first = min(kept) if kept else 0.0
+    lead = any(t < first for i, t in rows if (workout_id, i) in gone)
+    return {"lengths": len(gone), "lead_s": float(first) if lead else 0.0}
+
+
+def trim_header(engine: Engine, head: dict) -> dict:
+    """A workout's totals without the lengths that were not swimming.
+
+    Polar's distance, clock and average heart rate all count the fiddling at the
+    wall. Distance loses the excluded lengths; clock and heart rate start at the
+    first real length when junk filled the time before it.
+    """
+    t = excluded_trim(engine, int(head["id"]))
+    if not t:
+        return head
+    import numpy as np
+    from .models import hr_samples
+    head = dict(head)
+    n = head.get("n_lengths") or 0
+    pool_m = head.get("pool_length_m") or ((head.get("distance_m") or 0) / n if n else 0)
+    head["distance_m"] = max(0.0, (head.get("distance_m") or 0) - t["lengths"] * pool_m)
+    head["n_lengths"] = max(0, n - t["lengths"])
+    if t["lead_s"]:
+        head["duration_s"] = max(0.0, (head.get("duration_s") or 0) - t["lead_s"])
+        with engine.connect() as c:
+            hr = np.array([r[0] for r in c.execute(
+                sa.select(hr_samples.c.hr).where(sa.and_(
+                    hr_samples.c.workout_id == head["id"],
+                    hr_samples.c.t_s >= t["lead_s"])))], dtype=float)
+        if len(hr):
+            head["avg_hr"] = int(round(float(hr.mean())))
+    head["trim_s"] = t["lead_s"]
+    return head
 
 
 def classified_lengths(engine: Engine, workout_id: int | None = None,
@@ -545,10 +603,12 @@ def card_extras(engine, workout_id: int, df, ref=None) -> dict:
     # every length in the database to render one card.
     if ref is None:
         ref = metrics.build_reference(engine, classified_lengths(engine))
+    trim = (excluded_trim(engine, workout_id) or {}).get("lead_s", 0.0)
     with engine.connect() as c:
         hr = np.array([r[0] for r in c.execute(
             sa.select(hr_samples.c.hr)
-            .where(hr_samples.c.workout_id == workout_id)
+            .where(sa.and_(hr_samples.c.workout_id == workout_id,
+                           hr_samples.c.t_s >= trim))
             .order_by(hr_samples.c.t_s))], dtype=float)
 
     zone_time = []

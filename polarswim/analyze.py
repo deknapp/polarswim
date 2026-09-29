@@ -131,12 +131,17 @@ class AnalysisResult:
 
 
 # --- loading ---------------------------------------------------------------
-def load_lengths(engine: Engine, workout_id: int | None = None) -> pd.DataFrame:
+def load_lengths(engine: Engine, workout_id: int | None = None,
+                 keep_excluded: bool = False) -> pd.DataFrame:
     """Lengths joined to their workout, with pool length resolved.
 
     Polar sometimes omits `poolInfo` entirely. When it does, the pool length is
     still recoverable as distance / length-count, so those workouts stay usable
     instead of being dropped.
+
+    Lengths that were not swimming (see `detect_junk` and `polarswim exclude`)
+    are left out, so no view counts, averages or classifies them. Only the
+    analysis that decides which they are asks for them back.
     """
     stmt = (sa.select(
                 lengths.c.workout_id, lengths.c.idx, lengths.c.start_offset_s,
@@ -161,7 +166,78 @@ def load_lengths(engine: Engine, workout_id: int | None = None) -> pd.DataFrame:
                     .fillna(derived.astype(float)))
     df = df[df["pool_m"].notna() & (df["pool_m"] > 0)].copy()
     df["pace_s"] = df["duration_s"] * (REFERENCE_LENGTH_M / df["pool_m"])
+    if not keep_excluded:
+        from . import db
+        gone = db.load_excluded(engine, None if workout_id is None else [workout_id])
+        if gone:
+            keep = [(w, i) not in gone for w, i in zip(df["workout_id"], df["idx"])]
+            df = df[keep].copy()
     return df
+
+
+# --- lengths that were not swimming ------------------------------------------
+# Polar starts counting when the watch starts, and a swimmer does not start
+# swimming then: they stand at the wall, fiddle with the strap, push off and stop.
+# Those come out as "lengths", and a quarter of this history opens with some. On
+# 2026-09-28 the first five went 20, 16, 30, 16 and 15 s, at 82-99 bpm, against a
+# working heart rate of 116+ once the swim began.
+#
+# Two things have to agree, because either alone describes ordinary swimming:
+#   * heart rate. Every rep still sits well below the day's working level. Not
+#     enough on its own: the first length of ANY swim is low (median 18 bpm under
+#     the day's 10th percentile here), because the heart has not caught up yet.
+#   * pace. Somewhere in that low-HR run is a "length" faster than this swimmer
+#     can go: under three-quarters of the day's own fast pace, 16 s where the
+#     fastest real 25 of the day is 21.6 s.
+# The junk is everything up to the last rep that has both, so a normal-looking
+# 30 s record in the middle of the fiddling goes with it, and the first rep that
+# raises the heart rate ends the search.
+#
+# Only the START is searched. Mid-workout, an impossible record between rests is
+# far more often a real length whose wall time Polar put in the wrong place, and
+# deleting it would lose yards that were swum; those are the repair step's job.
+JUNK_FAST_RATIO = 0.75
+JUNK_HR_BELOW_P10 = 10.0            # bpm under the day's 10th-percentile length HR
+
+
+def length_hr(g: pd.DataFrame, series: np.ndarray | None) -> np.ndarray:
+    """Mean heart rate over each length, shifted by the cardiac lag."""
+    out = np.full(len(g), np.nan)
+    if series is None or not len(series):
+        return out
+    for k, (a, d) in enumerate(zip(g["start_offset_s"], g["duration_s"])):
+        lo = int(a) + HR_LAG_S
+        hi = min(int(a + d) + HR_LAG_S, len(series))
+        if lo < hi:
+            out[k] = float(np.mean(series[lo:hi]))
+    return out
+
+
+def detect_junk(df: pd.DataFrame, hr: dict[int, np.ndarray]) -> list[tuple[int, int]]:
+    """Lengths at the start of a workout that were not swimming.
+
+    `df` must carry `rep_id` (see `assign_sets`). A workout with no heart rate is
+    left alone: pace alone cannot tell the fiddling from a false turn.
+    """
+    out: list[tuple[int, int]] = []
+    for wid, g in df.groupby("workout_id", sort=True):
+        g = g.sort_values("idx")
+        h = length_hr(g, hr.get(int(wid)))
+        if np.isfinite(h).sum() < 10:
+            continue
+        floor = float(np.nanpercentile(h, 10)) - JUNK_HR_BELOW_P10
+        fast = float(np.nanpercentile(g["pace_s"], 15)) * JUNK_FAST_RATIO
+        g = g.assign(_hr=h)
+        last = None
+        for rid, r in g.groupby("rep_id", sort=True):
+            mean_hr = r["_hr"].mean()
+            if not np.isfinite(mean_hr) or mean_hr >= floor:
+                break                       # the swimmer is working: the swim has begun
+            if (r["pace_s"] < fast).any():
+                last = rid
+        if last is not None:
+            out += [(int(wid), int(i)) for i in g.loc[g["rep_id"] <= last, "idx"]]
+    return out
 
 
 def load_hr(engine: Engine, workout_ids: list[int]) -> dict[int, np.ndarray]:
@@ -824,7 +900,22 @@ def analyze(engine: Engine, workout_id: int | None = None,
     """Run the full analysis and, by default, persist model and predictions."""
     from . import db
 
-    df = load_lengths(engine, workout_id)
+    df = load_lengths(engine, workout_id, keep_excluded=True)
+    if df.empty:
+        return AnalysisResult()
+
+    # Drop what was not swimming before anything is computed from it: a 15 s
+    # "length" at the wall would otherwise set the day's fast pace, start a set,
+    # and be classified. Automatic calls are re-derived on every run; the
+    # swimmer's own exclusions are kept.
+    ids = sorted(int(w) for w in df["workout_id"].unique())
+    hr = load_hr(engine, ids)
+    junk = detect_junk(assign_sets(df), hr)
+    if persist:
+        db.save_auto_excluded(engine, ids, junk)
+    gone = set(junk) | set(db.load_excluded(engine, ids))
+    if gone:
+        df = df[[(w, i) not in gone for w, i in zip(df["workout_id"], df["idx"])]].copy()
     if df.empty:
         return AnalysisResult()
 
@@ -836,7 +927,6 @@ def analyze(engine: Engine, workout_id: int | None = None,
     df = assign_sets(df)
     readings = plan_.load_readings(engine, df, prior_ratios)
     df = plan_.restructure(df, readings)
-    hr = load_hr(engine, sorted(df["workout_id"].unique().tolist()))
     df = add_features(df, hr)
 
     # Repair first, then classify. An uncorrected merge carries a doubled time and

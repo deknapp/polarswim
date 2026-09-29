@@ -790,8 +790,9 @@ def create_app(db_url=None) -> Flask:
         import sqlalchemy as sa
         from .models import workouts
         with engine.connect() as c:
-            return dict(c.execute(sa.select(workouts)
+            head = dict(c.execute(sa.select(workouts)
                                   .where(workouts.c.id == wid)).mappings().first())
+        return report.trim_header(engine, head)
 
     return app
 

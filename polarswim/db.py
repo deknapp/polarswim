@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
-from .models import (ALL_TABLES, hr_samples, labels, lengths, metadata, plans,
+from .models import (ALL_TABLES, excluded, hr_samples, labels, lengths, metadata, plans,
                      model_params, predictions, raw_payloads, sync_runs, workouts)
 from .parse import Workout
 
@@ -325,6 +325,52 @@ def load_plans(engine: Engine, workout_ids: list[int] | None = None) -> dict[int
         stmt = stmt.where(plans.c.workout_id.in_(workout_ids))
     with engine.connect() as c:
         return {r.workout_id: r.text for r in c.execute(stmt)}
+
+
+# --- lengths that were not swimming ------------------------------------------
+def save_auto_excluded(engine: Engine, workout_ids, rows: list[tuple[int, int]]) -> None:
+    """Replace the automatic exclusions for these workouts; manual ones stay."""
+    ids = [int(w) for w in workout_ids]
+    manual = {k for k, why in load_excluded(engine, ids).items() if why == "manual"}
+    stamp = now_iso()
+    with engine.begin() as c:
+        c.execute(sa.delete(excluded).where(sa.and_(
+            excluded.c.workout_id.in_(ids), excluded.c.reason == "auto")))
+        todo = [dict(workout_id=int(w), idx=int(i), reason="auto", excluded_at=stamp)
+                for w, i in rows if (int(w), int(i)) not in manual]
+        if todo:
+            c.execute(sa.insert(excluded), todo)
+
+
+def exclude(engine: Engine, workout_id: int, idxs) -> int:
+    """The swimmer's word that these lengths were not swimming."""
+    idxs = sorted({int(i) for i in idxs})
+    if not idxs:
+        return 0
+    with engine.begin() as c:
+        c.execute(sa.delete(excluded).where(sa.and_(
+            excluded.c.workout_id == workout_id, excluded.c.idx.in_(idxs))))
+        c.execute(sa.insert(excluded), [
+            dict(workout_id=workout_id, idx=i, reason="manual", excluded_at=now_iso())
+            for i in idxs])
+    return len(idxs)
+
+
+def clear_excluded(engine: Engine, workout_id: int) -> int:
+    """Withdraw every manual exclusion on one workout (automatic ones re-derive)."""
+    with engine.begin() as c:
+        return c.execute(sa.delete(excluded).where(sa.and_(
+            excluded.c.workout_id == workout_id,
+            excluded.c.reason == "manual"))).rowcount
+
+
+def load_excluded(engine: Engine, workout_ids=None) -> dict[tuple[int, int], str]:
+    """Excluded lengths as {(workout_id, idx): reason}."""
+    stmt = sa.select(excluded.c.workout_id, excluded.c.idx, excluded.c.reason)
+    if workout_ids is not None:
+        stmt = stmt.where(excluded.c.workout_id.in_([int(w) for w in workout_ids]))
+    with engine.connect() as c:
+        return {(r.workout_id, r.idx): r.reason for r in c.execute(stmt)}
 
 
 def label_counts(engine: Engine) -> dict[str, int]:

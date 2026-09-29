@@ -20,6 +20,13 @@ is there because it is what the database and the web UI show.
 
 A plan is the workout as written (a .txt, or a .pdf via `pdftotext`). Put `#` in
 front of any line you did not swim.
+
+    polarswim exclude <date|id|latest> 1-5 9   lengths that were not swimming
+    polarswim exclude <date|id|latest> --show
+    polarswim exclude <date|id|latest> --clear
+
+Excluded lengths drop out of every total, average and set. The fiddling at the
+wall before a swim starts is found on its own; this is for anything it misses.
 """
 
 from __future__ import annotations
@@ -94,7 +101,7 @@ def _header(engine, workout_id: int) -> dict:
                         .where(workouts.c.id == workout_id)).mappings().first()
     if row is None:
         raise SystemExit(f"workout {workout_id} not found — run `polarswim sync` first")
-    return dict(row)
+    return report.trim_header(engine, dict(row))
 
 
 # --- commands --------------------------------------------------------------
@@ -207,6 +214,43 @@ def cmd_plan(args) -> int:
         engine, df, __import__("polarswim.patterns", fromlist=["x"]).from_params(
             db.load_model_params(engine)))
     print(plan_.describe(df, plan_.parse_plan(text), readings[wid]))
+    return 0
+
+
+def _idx_ranges(specs: list[str]) -> list[int]:
+    """`['1-5', '9']` -> [1, 2, 3, 4, 5, 9]."""
+    out = []
+    for spec in specs:
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            a, _, b = part.partition("-")
+            if not a.isdigit() or (b and not b.isdigit()):
+                raise SystemExit(f"not a length number or range: {part!r}")
+            out += list(range(int(a), int(b or a) + 1))
+    return out
+
+
+def cmd_exclude(args) -> int:
+    """Mark lengths as not swimming, then re-analyze the workout without them."""
+    engine = db.connect(args.db)
+    wid = resolve_workout(engine, args.workout)
+    if args.clear:
+        n = db.clear_excluded(engine, wid)
+        print(f"withdrew {n} manual exclusion(s) on {wid}")
+    elif args.lengths:
+        n = db.exclude(engine, wid, _idx_ranges(args.lengths))
+        print(f"excluded {n} length(s) on {wid}")
+    if args.clear or args.lengths:
+        analyze.analyze(engine)
+    gone = db.load_excluded(engine, [wid])
+    if not gone:
+        print("nothing excluded")
+    for why in ("auto", "manual"):
+        idxs = sorted(i for (_, i), r in gone.items() if r == why)
+        if idxs:
+            print(f"  {why:<6} {', '.join(map(str, idxs))}")
     return 0
 
 
@@ -393,6 +437,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="print the stored plan's alignment (the default without a file)")
     pl.add_argument("--clear", action="store_true", help="forget the stored plan")
     pl.set_defaults(func=cmd_plan)
+
+    ex = sub.add_parser("exclude", help="leave lengths that were not swimming out")
+    ex.add_argument("workout", metavar="date|id|latest",
+                    help="e.g. 2026-09-28, a Polar training id, or 'latest'")
+    ex.add_argument("lengths", nargs="*", help="length numbers or ranges, e.g. 1-5 9")
+    ex.add_argument("--show", action="store_true",
+                    help="list what is excluded (the default without lengths)")
+    ex.add_argument("--clear", action="store_true",
+                    help="withdraw your exclusions on this workout")
+    ex.set_defaults(func=cmd_exclude)
 
     rs = sub.add_parser("reparse", help="re-run the parser over stored payloads")
     rs.set_defaults(func=cmd_reparse)
