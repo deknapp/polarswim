@@ -980,13 +980,14 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # whole rep, so where they disagree the structure is the better evidence — and
     # `learn.apply` would otherwise overwrite a recognised 150 back/breast/free
     # one length at a time.
-    matches = pat.detect_patterns(df, ratios, pat.find_anchors(full))
+    matches = plan_.without_planned(
+        pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings)
     df = pat.label_patterns(df, matches)
 
     # After every automatic step and before the swimmer's own word: a rep is one
     # stroke, but a correction may say otherwise and must still win.
     df = enforce_rep_consistency(df)
-    df = plan_.apply_labels(df, plan_.labels(readings))
+    df = plan_.apply_labels(df, plan_.labels(readings), plan_.shapes(readings))
     df = learn.apply_labels(df, labels)
 
     kinds = {(r.workout_id, r.idx): r.kind for r in repairs}

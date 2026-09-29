@@ -134,10 +134,11 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     # one workout must not pay for a full-database pass.
     from . import patterns as pat
     ratios = pat.from_params(params)
-    df = pat.label_patterns(df, pat.detect_patterns(df, ratios))
+    df = pat.label_patterns(df, plan_.without_planned(pat.detect_patterns(df, ratios),
+                                                      readings))
 
     df = analyze.enforce_rep_consistency(df)
-    df = plan_.apply_labels(df, plan_.labels(readings))
+    df = plan_.apply_labels(df, plan_.labels(readings), plan_.shapes(readings))
     return learn.apply_labels(df, db.load_labels(engine, workout_id))
 
 

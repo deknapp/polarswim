@@ -155,7 +155,7 @@ Cool Down: 1 x 200                           (3200)
 def test_parse_reads_a_coach_pdf_layout():
     swims = plan.parse_plan(TERRIBLE_TUESDAY)
     warm = swims[0]
-    assert (warm.yards, warm.legs) == (600, [(200, None), (200, "kick"), (200, None)])
+    assert (warm.yards, warm.legs) == (600, [(200, "freestyle"), (200, "kick"), (200, None)])
     drill = swims[1:9]
     assert all((s.yards, s.stroke) == (50, "drill") for s in drill)   # `50s` is 50
     swim_drill = swims[9:13]
@@ -198,3 +198,32 @@ def test_a_swim_missing_from_the_plan_is_left_whole():
 def test_imo_can_leave_a_stroke_out():
     swims = plan.parse_plan("3x50s 25's Swim/25's Drill IMO no fly")
     assert [s.legs[0][1] for s in swims] == ["backstroke", "breaststroke", "freestyle"]
+
+
+def test_a_floating_im_is_named_im_and_a_swim_drill_by_its_parts():
+    swims = plan.parse_plan("1x125 IM\n    25 FL/50 BK/25 BR/25 FR\n"
+                            "1x50 25 Back/25 Drill")
+    df = _lengths([[27, 31, 30, 32, 25], [33, 36]])
+    r = plan.read(df, swims)
+    assert {r.shape[i] for i in range(1, 6)} == {"IM"}
+    assert r.shape[6] == "back/drill"
+    out = plan.apply_labels(df.assign(predicted="freestyle", confidence=0.5),
+                            plan.labels({1: r}), plan.shapes({1: r}))
+    assert out["im_continuous"].tolist() == [True] * 5 + [False] * 2
+
+
+def test_swim_is_freestyle_except_in_an_imo_rotation():
+    assert plan.parse_plan("1x150 Swim")[0].stroke == "freestyle"
+    assert plan.parse_plan("1x200 Choice")[0].stroke is None
+    imo = plan.parse_plan("4x50 25 Swim/25 Drill IMO")
+    assert imo[0].legs[0] == (25, "butterfly")
+
+
+def test_medley_patterns_keep_off_planned_swims():
+    from polarswim.patterns import PatternMatch
+    r = plan.PlanReading(stroke={}, factor={}, kind={}, rep_of={}, set_of={}, label={},
+                         segments=[plan.Segment(0, [6, 7, 8]), plan.Segment(None, [9, 10])])
+    m = lambda idxs: PatternMatch(1, 1, 1, ("butterfly", "backstroke"), 1, [], idxs,
+                                  0.0, 2.0, 0.9, "history")
+    kept = plan.without_planned([m([6, 7]), m([9, 10])], {1: r})
+    assert [k.idxs for k in kept] == [[9, 10]]

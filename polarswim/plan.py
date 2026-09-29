@@ -150,11 +150,19 @@ _STROKE_WORDS = (
 )
 
 
-def _stroke_of(text: str) -> str | None:
-    """The stroke a fragment names. Kick first: `Kick: Odd Back/Even Breast` is kick."""
+def _stroke_of(text: str, swim_is_free: bool = True) -> str | None:
+    """The stroke a fragment names. Kick first: `Kick: Odd Back/Even Breast` is kick.
+
+    A bare `Swim` is freestyle, as a coach means it — set against kick, drill
+    and pull, not a choice. Inside an IMO rotation it is whatever the rotation
+    says, so the caller turns that off there.
+    """
     for pat, name in _STROKE_WORDS:
         if re.search(pat, text, flags=re.I):
             return name
+    if swim_is_free and re.search(r"\bswim\b", text, re.I) \
+            and not re.search(r"\bchoice\b", text, re.I):
+        return "freestyle"
     return None
 
 
@@ -181,7 +189,7 @@ _SHORT_NAME = {"butterfly": "fly", "backstroke": "back",
                "breaststroke": "breast", "freestyle": "free"}
 
 
-def _legs(desc: str, yards: int) -> list[tuple[int, str | None]]:
+def _legs(desc: str, yards: int, swim_is_free: bool = True) -> list[tuple[int, str | None]]:
     """`50 FL/25 BK/25 BR/25 FR` -> legs, when they add up to the swim.
 
     Anything that does not sum to the distance is not a leg list — `Kick: Odd
@@ -196,7 +204,7 @@ def _legs(desc: str, yards: int) -> list[tuple[int, str | None]]:
         m = _DIST.match(p)
         if not m:
             return []
-        out.append((int(m.group(1)), _stroke_of(m.group(2))))
+        out.append((int(m.group(1)), _stroke_of(m.group(2), swim_is_free)))
     return out if sum(y for y, _ in out) == yards else []
 
 
@@ -249,8 +257,8 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
         rot = (order[r * len(order) // reps]
                if imo and order and reps >= len(order) else None)
         for i, (yards, desc) in enumerate(pieces):
-            stroke = _stroke_of(desc)
-            legs = _legs(desc, yards)
+            stroke = _stroke_of(desc, swim_is_free=not imo)
+            legs = _legs(desc, yards, swim_is_free=not imo)
             if legs:
                 legs = [(y, st if st is not None else rot) for y, st in legs]
                 strokes = {st for _, st in legs}
@@ -527,6 +535,9 @@ class PlanReading:
     set_of: dict[int, int]            # idx -> set number (one per plan line)
     label: dict[int, str]             # idx -> the plan line
     segments: list[Segment]
+    # idx -> what to call a swim of several strokes: `IM` for any medley-order
+    # swim of all four (a floating IM too), else its strokes, `back/drill`.
+    shape: dict[int, str] = field(default_factory=dict)
 
 
 def read(g: pd.DataFrame, swims: list[Swim],
@@ -536,6 +547,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
     g = g.set_index("idx")
     pool_yd = float(g["pool_m"].iloc[0]) / 0.9144
     stroke, factor, kind, rep_of, set_of, label = {}, {}, {}, {}, {}, {}
+    shape: dict[int, str] = {}
 
     rep = 0
     set_no = 0
@@ -592,10 +604,24 @@ def read(g: pd.DataFrame, swims: list[Swim],
                                   len(legs) - 1)][1]
             if leg_stroke is not None:
                 stroke[i] = leg_stroke
+            if not one_stroke:
+                shape[i] = _shape(legs)
             if lopsided and one_stroke:
                 factor[i] = float(t / per_length)
                 kind[i] = "resplit"
-    return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs)
+    return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs, shape)
+
+
+def _shape(legs: list[tuple[int, str | None]]) -> str:
+    """`IM` for fly-back-breast-free in order however the yards fall, else the
+    strokes in order: `back/drill`."""
+    seq = []
+    for _, st in legs:
+        if st is not None and (not seq or seq[-1] != st):
+            seq.append(st)
+    if tuple(seq) == IM_ORDER:
+        return "IM"
+    return "/".join(_SHORT.get(st, st) for st in seq) or "choice"
 
 
 def restructure(df: pd.DataFrame, readings: dict[int, PlanReading]) -> pd.DataFrame:
@@ -649,7 +675,25 @@ def load_readings(engine, df: pd.DataFrame,
     return out
 
 
-def apply_labels(df: pd.DataFrame, plan_labels: dict[tuple[int, int], str]) -> pd.DataFrame:
+def without_planned(matches: list, readings: dict[int, PlanReading]) -> list:
+    """Medley-pattern matches that touch no planned swim.
+
+    A pattern match can re-cut a rep into rungs, and on a planned swim that
+    undoes the plan: a 150 free warm-up came out as a 50 and a 100 of fly/back.
+    The plan already says what the swim was, so the guess is not wanted there.
+    """
+    planned = {(int(w), i) for w, r in readings.items()
+               for seg in r.segments if seg.swim_no is not None for i in seg.idxs}
+    return [m for m in matches
+            if not any((int(m.workout_id), int(i)) in planned for i in m.idxs)]
+
+
+def shapes(readings: dict[int, PlanReading]) -> dict[tuple[int, int], str]:
+    return {(int(w), int(i)): s for w, r in readings.items() for i, s in r.shape.items()}
+
+
+def apply_labels(df: pd.DataFrame, plan_labels: dict[tuple[int, int], str],
+                 plan_shapes: dict[tuple[int, int], str] | None = None) -> pd.DataFrame:
     """Stamp the planned stroke over every inference.
 
     The swimmer's own word about the swim, so it outranks the rules, the model,
@@ -670,6 +714,19 @@ def apply_labels(df: pd.DataFrame, plan_labels: dict[tuple[int, int], str]) -> p
     df.loc[hit, "label_source"] = "plan"
     if "pattern" in df.columns:
         df.loc[hit, "pattern"] = None
+    if plan_shapes:
+        # A swim of several strokes is named for its shape, and one of all four is
+        # a medley: kept out of every single-stroke ranking.
+        named = [k in plan_shapes for k in key]
+        for col, default in (("pattern", None), ("im_continuous", False),
+                             ("mixed_rep", False)):
+            if col not in df.columns:
+                df[col] = default
+        df["pattern"] = df["pattern"].astype(object)
+        df.loc[named, "pattern"] = [plan_shapes[k] for k in key if k in plan_shapes]
+        df.loc[named, "im_continuous"] = [plan_shapes[k] == "IM" for k in key
+                                          if k in plan_shapes]
+        df.loc[named, "mixed_rep"] = True
     return df
 
 
