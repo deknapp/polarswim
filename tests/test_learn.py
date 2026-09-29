@@ -166,3 +166,20 @@ class TestAccuracyReporting:
         df["set_id"] = (df["idx"] - 1) // 10 + 1
         for row in learn.cross_validate(df, _labels(df))["confusion"]:
             assert {"actual", "predicted", "n"} <= set(row)
+
+
+def test_a_model_is_used_only_when_it_beats_the_rules_held_out():
+    """Balanced labels are not enough: a model that loses to the rules on
+    held-out lengths must not be applied."""
+    rng = np.random.default_rng(1)
+    rows = []
+    for s in range(12):                       # 12 sets, strokes indistinguishable
+        stroke = ("freestyle", "backstroke")[s % 2]
+        for i in range(4):
+            rows.append(dict(workout_id=1, idx=s * 4 + i + 1, set_id=s,
+                             predicted=stroke, truth=stroke,
+                             **{f: float(rng.normal()) for f in learn.FEATURES}))
+    df = pd.DataFrame(rows)
+    labels = {(1, int(r.idx)): r.truth for r in df.itertuples()}
+    gate = learn.beats_rules(df, labels)
+    assert gate["rules"] == 100.0 and not gate["use"]

@@ -179,6 +179,11 @@ def cmd_analyze(args) -> int:
     total = sum(res.counts().values())
     for k, v in sorted(res.counts().items(), key=lambda kv: -kv[1]):
         print(f"    {k:<14} {v:>6,}  {100*v/total:>5.1f}%  {'▇' * int(50*v/total)}")
+    gate = res.model_gate
+    if gate:
+        verdict = "using it" if gate["use"] else "not using it; the rules stand"
+        print(f"\n  model from {gate['n']} labelled lengths: {gate['model']}% held out "
+              f"vs the rules' {gate['rules']}% — {verdict}")
     g = res.params.get("_global", {})
     if g:
         print(f"\n  learned reference paces (s/25yd) from {int(g['n_obs']):,} lengths:")

@@ -284,3 +284,25 @@ def cross_validate(df: pd.DataFrame, labels: dict[tuple[int, int], str],
         "confusion": [{"actual": a, "predicted": p, "n": n}
                       for (a, p), n in sorted(confusion.items(), key=lambda kv: -kv[1])],
     }
+
+
+def beats_rules(df: pd.DataFrame, labels: dict[tuple[int, int], str]) -> dict:
+    """Whether a model fitted to these labels predicts held-out ones better than
+    the rules already do. `df` carries the rules' own `predicted`.
+
+    Having enough of each stroke is not the same as having enough to learn from.
+    Two planned workouts gave 12+ lengths of every stroke and a model that scored
+    43% held out against the rules' 75% on the same lengths; applied, it moved
+    4,063 lengths of history, freestyle 6,230 -> 3,874 and kick 317 -> 2,330. So
+    the model earns its place on held-out accuracy or it is not used. The rules
+    learn nothing from the labels, so scoring them on every label is fair.
+    """
+    key = list(zip(df["workout_id"], df["idx"]))
+    truth = pd.Series([labels.get(k) for k in key], index=df.index)
+    mask = truth.notna() & (truth != "undetermined")
+    rules = (round(100 * float((df.loc[mask, "predicted"] == truth[mask]).mean()), 1)
+             if mask.any() else None)
+    cv = cross_validate(df, labels)
+    model = cv.get("accuracy")
+    return {"n": int(mask.sum()), "model": model, "rules": rules,
+            "use": model is not None and (rules is None or model > rules)}

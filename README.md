@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 455 tests, no network
+.venv/bin/pytest -q                                # 456 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -447,10 +447,18 @@ The alignment then does three things:
   length, you swam less than the plan said, and nothing is invented.
 
 Planned strokes also train the correction model — but only once planned
-workouts cover all four strokes with at least eight lengths each. One workout is
-mostly freestyle, and a model fitted to the first plan alone re-labelled 2,228
-lengths of history toward freestyle. Until the gate opens, a plan corrects only
-the workout it describes.
+workouts cover all four strokes with at least eight lengths each, AND only if the
+model then beats the rules on lengths it was not trained on. The first condition
+alone was not enough: two plans cleared it, and the model they trained scored 43%
+held out against the rules' 75% on the same lengths, and moved 4,063 lengths of
+history (freestyle 6,230 -> 3,874, kick 317 -> 2,330) before the second check
+existed. `polarswim analyze` prints both numbers and which one it used.
+
+With two plans in, the rules score 78% (9/25) and 71% (9/28) on the planned
+strokes. Freestyle is nearly always right (67/72) and backstroke usually (14/15);
+breaststroke reads as backstroke (10 of 14) and butterfly as back or free (10 of
+12), because this swimmer's back and breast cost the same time and fly 25s run
+near freestyle pace. Each annotated workout is another row of that table.
 
 ## Lengths that were not swimming
 

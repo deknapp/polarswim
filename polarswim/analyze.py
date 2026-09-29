@@ -122,6 +122,9 @@ class AnalysisResult:
     im_rounds: list["IMRound"] = field(default_factory=list)
     stroke_patterns: list = field(default_factory=list)
     n_lengths: int = 0
+    # Held-out accuracy of the label-trained model against the rules, and
+    # whether it was used (see `learn.beats_rules`).
+    model_gate: dict = field(default_factory=dict)
 
     def counts(self) -> dict[str, int]:
         out = {c: 0 for c in CLASSES}
@@ -970,11 +973,19 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # it to be balanced (see `plan.training_labels`); a hand correction wins
     # where both exist.
     training = {**plan_.training_labels(full_readings), **labels}
+    gate: dict = {}
     if training:
         fitted = learn.fit(full if workout_id is None else df, training)
         if fitted.is_usable():
-            params.update(fitted.as_params())
-            df = learn.apply(df, fitted)
+            if workout_id is None:
+                ruled = df
+            else:
+                ruled = classify(full, params)
+                ruled = label_im(ruled, detect_im(ruled))
+            gate = learn.beats_rules(ruled, training)
+            if gate["use"]:
+                params.update(fitted.as_params())
+                df = learn.apply(df, fitted)
     # Medley patterns land after the fitted model, not before it. The model is a
     # per-length pace/cost classifier and the pattern is a structural reading of a
     # whole rep, so where they disagree the structure is the better evidence — and
@@ -1005,4 +1016,5 @@ def analyze(engine: Engine, workout_id: int | None = None,
         db.save_predictions(engine, rows)
 
     return AnalysisResult(predictions=rows, params=params, repairs=repairs,
-                          im_rounds=im, stroke_patterns=matches, n_lengths=len(df))
+                          im_rounds=im, stroke_patterns=matches, n_lengths=len(df),
+                          model_gate=gate)
