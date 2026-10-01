@@ -80,6 +80,9 @@ CLASSES = ("freestyle", "backstroke", "breaststroke", "butterfly",
 # 266 lengths of this history sit in that band — 157 of them currently read as
 # freestyle, which is what the swimmer's own corrections are for.
 KICK_PACE_RATIO = 1.45
+# Backstroke vs breaststroke needs this many annotated lengths of each before
+# their pace split is learned (see `learn_back_breast`).
+BACK_BREAST_MIN_LABELS = 8
 DRILL_PACE_RATIO = 1.18
 
 # Four of those eight are not strokes. `kick` and `drill` are lengths swum on
@@ -508,6 +511,37 @@ def learn_params(df: pd.DataFrame) -> dict[str, dict[str, float]]:
     }
 
 
+def learn_back_breast(df: pd.DataFrame,
+                      labels: dict[tuple[int, int], str]) -> dict[str, float]:
+    """Where this swimmer's backstroke and breaststroke part, from labelled lengths.
+
+    No speed order between the two is assumed — that was settled at the start,
+    because his backstroke may be slower than his breaststroke. Labels measure it
+    instead: the median pace of each, as a multiple of the day's freestyle, and
+    the split halfway between. On the first three annotated workouts (9/25, 9/28,
+    9/30) back ran 1.32 and breast 1.27, back the slower in two of the three.
+
+    Heart-rate cost, which the unlabelled rule reads, did not separate them on
+    those lengths at all (medians 39 and 40 bpm above baseline). Recent sessions
+    all sit above the history's 67th cost percentile, so that rule called every
+    slow length backstroke. Empty until each stroke has enough labels.
+    """
+    if df.empty or not labels or "free_ref_s" not in df.columns:
+        return {}
+    key = list(zip(df["workout_id"].astype(int), df["idx"].astype(int)))
+    truth = pd.Series([labels.get(k) for k in key], index=df.index)
+    ratio = df["pace_s"] / df["free_ref_s"]
+    back = ratio[truth == "backstroke"].dropna()
+    breast = ratio[truth == "breaststroke"].dropna()
+    if min(len(back), len(breast)) < BACK_BREAST_MIN_LABELS:
+        return {}
+    mb, mr = float(back.median()), float(breast.median())
+    if mb == mr:
+        return {}
+    return {"split": (mb + mr) / 2, "back_slower": float(mb > mr),
+            "n_back": float(len(back)), "n_breast": float(len(breast))}
+
+
 def support_class(pace_ratio: float) -> str:
     """Name work already known not to be a stroke: kick, drill, or neither.
 
@@ -575,6 +609,7 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
     c33, c67 = g.get("cost_p33", 0.0), g.get("cost_p67", 0.0)
     r50, r80 = g.get("rest_p50", 0.0), g.get("rest_p80", 0.0)
     have_rest = r80 > 0
+    bb = params.get("_back_breast") or {}
     # Freestyle is the majority stroke, so it is the default hypothesis. Another
     # stroke is only called on positive evidence; where the evidence is weak the
     # answer is `undetermined` rather than a coin flip dressed up as a result.
@@ -625,6 +660,20 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
                 # No heart rate. Rest alone cannot name a stroke, but a slow set
                 # on short rest is far more likely aerobic work than a race stroke.
                 call(support if have_rest and rest <= r50 else "undetermined", 0.30)
+                continue
+            if bb:
+                if cost >= c67 and long_rest:
+                    call("butterfly", 0.42)
+                    continue
+                # The swimmer's own annotated lengths say which of the two is
+                # slower and where they part; see `learn_back_breast`.
+                ratio = pace / r.free_ref_s if getattr(r, "free_ref_s", 0) else np.nan
+                if not np.isfinite(ratio):
+                    call("undetermined", 0.33)
+                elif (ratio >= bb["split"]) == bool(bb["back_slower"]):
+                    call("backstroke", 0.45)
+                else:
+                    call("breaststroke", 0.45)
                 continue
             if cost >= c67:
                 # Slow and expensive: working hard without travelling. Backstroke
@@ -951,6 +1000,10 @@ def analyze(engine: Engine, workout_id: int | None = None,
         full = apply_repairs(full, plan_.merge_repairs(
             detect_repairs(full), plan_.repairs(full_readings, full)))
     params = learn_params(full)
+    from . import db as _db
+    bb = learn_back_breast(full, {**plan_.labels(full_readings), **_db.load_labels(engine)})
+    if bb:
+        params["_back_breast"] = bb
     df = classify(df, params)
 
     # Medley rounds are recognised structurally, so their strokes are known rather
@@ -991,9 +1044,15 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # whole rep, so where they disagree the structure is the better evidence — and
     # `learn.apply` would otherwise overwrite a recognised 150 back/breast/free
     # one length at a time.
-    matches = plan_.without_planned(
-        pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings)
+    # Freestyle with single-length stroke inserts is read before the medley
+    # matcher's guesses land, and wins over them: an unbroken 200 of
+    # `75 FR + 25 Fly + 75 FR + 25 BK` otherwise reads as a 200 IM in 50s.
+    from . import inserts as ins
+    found = ins.detect_inserts(df)
+    matches = ins.without_inserts(plan_.without_planned(
+        pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings), found)
     df = pat.label_patterns(df, matches)
+    df = ins.label_inserts(df, found)
 
     # After every automatic step and before the swimmer's own word: a rep is one
     # stroke, but a correction may say otherwise and must still win.
