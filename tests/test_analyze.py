@@ -558,3 +558,18 @@ class TestSupportWork:
         assert "kick" in analyze.UNNAMED_STROKES
         assert "drill" in analyze.UNNAMED_STROKES
         assert "kick" not in analyze.NAMED_STROKES
+
+
+def test_a_merge_in_a_set_too_short_for_its_own_median_is_still_found():
+    """2026-09-30 opened with 26.4 / 52.0 / 21.6 unbroken: a missed wall in a
+    set of three, which the set-median rule cannot read."""
+    durations = [26.4, 52.0, 21.6] + [25.0] * 12
+    gaps = [0, 0, 0] + [20.0, 0] * 6
+    df = _featured(durations, gaps=gaps)
+    merged = [r for r in analyze.detect_merges(df) if r.kind == "merged"]
+    assert [(r.idx, r.factor) for r in merged] == [(2, 2.0)]
+
+
+def test_a_lone_slow_record_with_no_swimming_beside_it_is_left_alone():
+    df = _featured([52.0] + [25.0] * 12, gaps=[0] + [20.0, 0] * 6)
+    assert analyze.detect_merges(df) == []

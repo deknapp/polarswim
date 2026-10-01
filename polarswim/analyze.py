@@ -300,8 +300,10 @@ def detect_merges(df: pd.DataFrame, max_factor: int = 4,
     to have a trustworthy median are left alone.
     """
     repairs: list[Repair] = []
+    day_med = df.groupby("workout_id")["pace_s"].median()
     for (wid, sid), g in df.groupby(["workout_id", "set_id"]):
         if len(g) < 4:
+            repairs.extend(_short_set_merges(g, float(day_med[wid]), max_factor, tolerance))
             continue
         med = float(g["pace_s"].median())
         if med <= 0:
@@ -318,6 +320,32 @@ def detect_merges(df: pd.DataFrame, max_factor: int = 4,
             repairs.append(Repair(wid, row.idx, row.pace_s, med,
                                   float(factor), "merged"))
     return repairs
+
+
+def _short_set_merges(g: pd.DataFrame, day_med: float, max_factor: int,
+                      tolerance: float) -> list[Repair]:
+    """Merges in a set too short for its own median, read against the day's.
+
+    Only a record INSIDE an unbroken swim, with a neighbour at ordinary pace on
+    each side it has one: no stroke this swimmer swims runs at twice the day's
+    median, so a 52 s record between a 26.4 and a 21.6 in one continuous swim is
+    a missed wall (2026-09-30, lengths 1-3, a set of three the rule skipped).
+    """
+    out: list[Repair] = []
+    if day_med <= 0 or "rep_id" not in g.columns:
+        return out
+    g = g.sort_values("idx")
+    pace, reps = g["pace_s"].to_numpy(dtype=float), g["rep_id"].to_numpy()
+    for k, row in enumerate(g.itertuples()):
+        ratio = pace[k] / day_med
+        factor = int(round(ratio))
+        if ratio < 1.6 or not 2 <= factor <= max_factor or abs(ratio - factor) > tolerance:
+            continue
+        nbrs = [j for j in (k - 1, k + 1) if 0 <= j < len(g) and reps[j] == reps[k]]
+        if nbrs and all(pace[j] / day_med <= 1.3 for j in nbrs):
+            out.append(Repair(int(row.workout_id), int(row.idx), float(pace[k]),
+                              day_med, float(factor), "merged"))
+    return out
 
 
 def detect_splits(df: pd.DataFrame, fast_ratio: float = 0.72,
