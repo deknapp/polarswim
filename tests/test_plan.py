@@ -227,3 +227,53 @@ def test_medley_patterns_keep_off_planned_swims():
                                   0.0, 2.0, 0.9, "history")
     kept = plan.without_planned([m([6, 7]), m([9, 10])], {1: r})
     assert [k.idxs for k in kept] == [[9, 10]]
+
+
+AEROBIC_IM = """\
+Warm Up:
+6 x 50 "6-3-6" Odd Free/ Even Back (fins?)
+6 x 50 (25 Fast Free + 25 Fly DPS)             (900)
+Drill:
+2x (8 x 25) R1-Breast & R2-Fly
+    R1: Odd 1 Pull-2 Kick/Even Breast DPS
+    R2: Odd "Stone Skip"/Even Fly DPS          (400)
+Aerobic IM:
+2x (75 FR + 25 Fly + 75 FR + 25 BK)    R:15"
+1 x 100 Ez Choice                              (500)
+4 x 100 - Consistent Pacing         @base + 15"
+    Odd 100 Free/Even 100 IM                   (400)
+"""
+
+
+def test_parse_reads_odd_even_rounds_and_stroke_inserts():
+    swims = plan.parse_plan(AEROBIC_IM)
+    assert [s.stroke for s in swims[:6]] == ["freestyle", "backstroke"] * 3
+    fifty = swims[6]                                  # one 50 in two legs
+    assert (fifty.yards, fifty.legs) == (50, [(25, "freestyle"), (25, "butterfly")])
+    drill = [s.stroke for s in swims[12:28]]
+    assert drill == ["drill", "breaststroke"] * 4 + ["drill", "butterfly"] * 4
+    insert = swims[28]                                # unbroken, not four swims
+    assert insert.yards == 200 and [st for _, st in insert.legs] == [
+        "freestyle", "butterfly", "freestyle", "backstroke"]
+    assert swims[30].easy and swims[30].yards == 100
+    hundreds = swims[31:]
+    assert [(s.yards, s.stroke) for s in hundreds] == [
+        (100, "freestyle"), (100, "IM")] * 2          # `+ 15"` is not a swim
+
+
+def test_a_swim_polar_logged_short_can_still_be_placed():
+    """Both 100 EZs of 2026-09-30 came out as two lengths. Placing one must not
+    slide the next 200 two lengths into the middle of an unbroken run."""
+    swims = plan.parse_plan("1 x 100 EZ Choice\n"
+                            "1 x 200: 75 FR/25 BK/75 FR/25 BR")
+    df = _lengths([[28, 26], [23, 21, 25, 30, 24, 25, 26, 33]], rest=50)
+    segs = plan.align(df, swims)
+    assert [(s.swim_no, s.idxs) for s in segs] == [(0, [1, 2]), (1, list(range(3, 11)))]
+
+
+def test_inserts_land_where_the_slow_lengths_are():
+    swims = plan.parse_plan("2x (75 FR + 25 Fly + 75 FR + 25 BK)")
+    df = _lengths([[23, 23, 24, 33, 24, 25, 24, 32], [25, 24, 24, 33, 26, 25, 26, 32]])
+    r = plan.read(df, swims)
+    assert [r.stroke[i] for i in range(1, 9)] == (
+        ["freestyle"] * 3 + ["butterfly"] + ["freestyle"] * 3 + ["backstroke"])
