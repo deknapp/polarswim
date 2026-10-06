@@ -273,6 +273,17 @@ class TestProfile:
         df = _workout([[25.9, 25.9, 24.5, 24.5, 24.8, 24.8, 21.9, 21.9]])
         assert patterns.find_anchors(df) == []
 
+    def test_a_sprint_finish_on_a_free_100_is_not_an_anchor(self):
+        """10/6: 23.2 21.6 22.4 then a real 17.6. Against its own last leg the
+        first three look like fly/back/breast; against the day's free they are
+        free."""
+        df = _workout([[23.2, 21.6, 22.4, 17.6]])
+        df["free_ref_s"] = 22.4
+        assert patterns.find_anchors(df) == []
+        real = _workout([_legs(analyze.IM_ORDER)])
+        real["free_ref_s"] = 22.4
+        assert len(patterns.find_anchors(real)) == 1
+
     def test_a_real_medley_anchors(self):
         df = _workout([_legs(analyze.IM_ORDER, per_leg=2)])
         anchors = patterns.find_anchors(df)

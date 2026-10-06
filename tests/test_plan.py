@@ -200,6 +200,16 @@ def test_imo_can_leave_a_stroke_out():
     assert [s.legs[0][1] for s in swims] == ["backstroke", "breaststroke", "freestyle"]
 
 
+def test_im_without_a_stroke_is_a_medley_of_the_rest():
+    """`IM w/o Free` is fly/back/breast — the slash in `w/o` is not odd/even."""
+    swims = plan.parse_plan("2 x 75 IM w/o Free  @ 1:15 / 1:25 / 1:35")
+    assert len(swims) == 2
+    for s in swims:
+        assert s.legs == [(25, "butterfly"), (25, "backstroke"), (25, "breaststroke")]
+    swims = plan.parse_plan("1 x 150 IM without fly")
+    assert [st for _, st in swims[0].legs] == ["backstroke", "breaststroke", "freestyle"]
+
+
 def test_a_floating_im_is_named_im_and_a_swim_drill_by_its_parts():
     swims = plan.parse_plan("1x125 IM\n    25 FL/50 BK/25 BR/25 FR\n"
                             "1x50 25 Back/25 Drill")

@@ -197,6 +197,12 @@ class PatternMatch:
 # a descending free swim holds every leg within a few percent of it.
 ANCHOR_MIN_RATIO = 1.10        # every non-free leg, against the free leg
 ANCHOR_MIN_MEDIAN_RATIO = 1.20  # and the typical one, by more
+# ...and against the DAY's freestyle, not only the rep's own last leg. A free
+# 100 finished with a sprint (10/6: 23.2 21.6 22.4 then a real 17.6) has three
+# ordinary free lengths at 1.2-1.3x its last one. Across the history real
+# medleys sit at 1.2-1.4x the day's free and those reps at 0.9-1.08x; 10/6's
+# "100 IM" was one, inside a 3x100 free descend.
+ANCHOR_MIN_DAY_RATIO = 1.15
 
 
 def find_anchors(df: pd.DataFrame) -> list[dict]:
@@ -220,6 +226,9 @@ def find_anchors(df: pd.DataFrame) -> list[dict]:
             if free <= 0 or others.min() < free * ANCHOR_MIN_RATIO:
                 continue
             if float(np.median(others)) < free * ANCHOR_MIN_MEDIAN_RATIO:
+                continue
+            ref = float(g["free_ref_s"].iloc[0]) if "free_ref_s" in g.columns else np.nan
+            if np.isfinite(ref) and float(np.median(others)) < ref * ANCHOR_MIN_DAY_RATIO:
                 continue
             order = IM_ORDER[::-1] if reverse else IM_ORDER
             out.append(dict(workout_id=int(wid), rep_id=int(rid), reverse=reverse,

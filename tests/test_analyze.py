@@ -274,6 +274,19 @@ class TestRestAndSetSizeInform_TheClassifier:
         assert analyze.classify(short, params)["predicted"].iloc[0] == "backstroke"
         assert analyze.classify(long, params)["predicted"].iloc[0] == "butterfly"
 
+    def test_hard_freestyle_at_typical_pace_is_not_called_butterfly(self):
+        """Cost does not pick fly out of the typical band: hard free costs more.
+
+        On the annotated workouts the CBAR 200s and descending 100s ran dearer
+        than his fly at the same pace, so the old rule called them butterfly.
+        """
+        params = {"_global": {"pace_p30": 24, "pace_p50": 27, "pace_p70": 30,
+                              "pace_p90": 40, "cost_p33": 5, "cost_p67": 20,
+                              "rest_p50": 20, "rest_p80": 45}}
+        df = _featured([26] * 8, gaps=[60] * 8, hr=170)
+        df["hr_cost"] = 45.0
+        assert set(analyze.classify(df, params)["predicted"]) == {"freestyle"}
+
     def test_a_slow_set_on_long_rest_is_not_called_drill(self):
         """Drill is slow AND cheap AND taken on short rest. Long rest means work."""
         params = {"_global": {"pace_p30": 24, "pace_p50": 27, "pace_p70": 30,

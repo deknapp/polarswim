@@ -674,13 +674,13 @@ def classify(df: pd.DataFrame, params: dict[str, dict[str, float]]) -> pd.DataFr
             call("freestyle", 0.80); continue
 
         if pace <= p70:
-            # Fast-to-typical: still freestyle unless it was unusually expensive,
-            # which is butterfly's signature — fast for what it costs. Long rest
-            # on top of that cost is the confirming evidence.
-            if not np.isnan(cost) and cost >= c67:
-                call("butterfly", 0.58 if long_rest else 0.45)
-            else:
-                call("freestyle", 0.65)
+            # Fast-to-typical is freestyle. Heart-rate cost was meant to pick
+            # butterfly out of this band, but on the annotated workouts it points
+            # the wrong way: hard freestyle (CBAR 200s, descending 100s) runs
+            # dearer than his fly here (median 40 vs 36 bpm over baseline), and
+            # the rule called 102 free lengths to find 16 fly. Fly in this band
+            # is left to the structural readers (medleys, inserts, plans).
+            call("freestyle", 0.65)
             continue
 
         if pace <= p90:

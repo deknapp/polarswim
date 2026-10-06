@@ -249,6 +249,11 @@ _ROUND_LINE = re.compile(r"^\s*R(\d)\s*:\s*(.*)$")
 _ODD_EVEN_LINE = re.compile(r"^\s*odd\b.*/\s*even\b", re.I)
 # `@base + 15"` is a send-off, not a 15-yard swim.
 _BASE = re.compile(r"@\s*base\b.*$", re.I)
+# `75 IM w/o Free`: a medley of the strokes left, in order. The slash in `w/o`
+# must not read as an odd/even pair.
+_IM_WITHOUT = re.compile(
+    r"\bIM\s+(?:w/o|without|minus|no|less)\s+(fly|butterfly|back(?:stroke)?|"
+    r"breast(?:stroke)?|free(?:style)?)\b", re.I)
 
 
 def _alternation(desc: str, drill: bool = False) -> list[str | None]:
@@ -305,6 +310,8 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
     # `IMO no fly`: the rotation without the strokes named after "no".
     order = [st for st in IM_ORDER if not re.search(
         r"\bno\s+" + _SHORT_NAME[st] + r"\b", line_wo, re.I)] if imo else []
+    drop = _IM_WITHOUT.search(line_wo)
+    medley = [st for st in IM_ORDER if st != _stroke_of(drop.group(1))] if drop else []
     swims: list[Swim] = []
     for r in range(reps):
         # IMO: the reps go fly, back, breast, free — 8 x 50 is two of each.
@@ -319,7 +326,11 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
                 stroke = strokes.pop() if len(strokes) == 1 else None
             elif stroke is None:
                 stroke = rot
-            alt = _alternation(desc) if reps > 1 and stroke not in ("kick", "drill") else []
+            if medley and not legs and yards % len(medley) == 0:
+                legs = [(yards // len(medley), st) for st in medley]
+                stroke = None
+            alt = (_alternation(desc) if reps > 1 and not medley
+                   and stroke not in ("kick", "drill") else [])
             if alt and not legs:
                 stroke = alt[r % 2]
             swims.append(Swim(
