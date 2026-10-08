@@ -682,6 +682,11 @@ class PlanReading:
     # idx -> what to call a swim of several strokes: `IM` for any medley-order
     # swim of all four (a floating IM too), else its strokes, `back/drill`.
     shape: dict[int, str] = field(default_factory=dict)
+    # Lengths whose time includes a rest Polar did not see: the plan ends a swim
+    # there, nothing joins it to the next, yet Polar logged no gap. On a 25s set
+    # on a send-off the swimmer rested 10-20 s at the wall and Polar folded it
+    # into the length, so its time is swim + rest and says nothing about pace.
+    rest_hidden: set[int] = field(default_factory=set)
 
 
 def read(g: pd.DataFrame, swims: list[Swim],
@@ -753,7 +758,14 @@ def read(g: pd.DataFrame, swims: list[Swim],
             if lopsided and one_stroke:
                 factor[i] = float(t / per_length)
                 kind[i] = "resplit"
-    return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs, shape)
+    hidden = set()
+    for a, b in zip(segs, segs[1:]):
+        if (a.swim_no is not None and b.swim_no is not None and a.idxs and b.idxs
+                and not swims[a.swim_no].joined
+                and g.at[b.idxs[0], "rest_before_s"] <= REST_GAP_S):
+            hidden.add(a.idxs[-1])
+    return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs, shape,
+                       hidden)
 
 
 def _shape(legs: list[tuple[int, str | None]]) -> str:
@@ -778,10 +790,12 @@ def restructure(df: pd.DataFrame, readings: dict[int, PlanReading]) -> pd.DataFr
     if not readings:
         return df
     df = df.copy()
+    df["rest_hidden"] = False
     for wid, r in readings.items():
         rows = df["workout_id"] == wid
         df.loc[rows, "rep_id"] = [r.rep_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
         df.loc[rows, "set_id"] = [r.set_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
+        df.loc[rows, "rest_hidden"] = [int(i) in r.rest_hidden for i in df.loc[rows, "idx"]]
     df["rep_lengths"] = df.groupby(["workout_id", "rep_id"])["idx"].transform("size")
     return df
 

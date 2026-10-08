@@ -145,6 +145,18 @@ class TestArtifactFiltering:
         best = ref.best_rep.get((100, "freestyle"))
         assert best and best["workout_id"] != 3
 
+    def test_a_rep_holding_an_unlogged_rest_is_not_ranked(self):
+        """Its time is swim plus rest: never a best, never in the percentiles."""
+        from polarswim import db
+        engine = db.connect(":memory:")
+        rows = [dict(workout_id=w, rep_id=1, idx=1, duration_s=d, pace_s=d,
+                     pool_m=22.86, predicted="backstroke", start_time="2026-01-01",
+                     rest_hidden=h)
+                for w, d, h in ((1, 30.0, False), (2, 24.0, True))]
+        ref = metrics.build_reference(engine, pd.DataFrame(rows))
+        assert ref.best_rep[(25, "backstroke")]["workout_id"] == 1
+        assert list(ref.pace_by_stroke["backstroke"]) == [30.0]
+
     def test_the_floor_is_relative_to_the_swimmer(self):
         assert metrics.PLAUSIBLE_FLOOR_RATIO < 1.0
 

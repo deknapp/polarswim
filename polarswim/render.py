@@ -247,7 +247,7 @@ def set_card(df: pd.DataFrame, header: dict, sets: list[dict] | None = None,
         # A distance with too few comparable reps cannot be ranked honestly, so
         # it says so rather than inventing a percentile.
         parts.append(f"{speed['percentile']}%" if speed else "—")
-        parts.append(f"{row['pace_50_s']:.0f}s")
+        parts.append(f"{row['pace_50_s']:.0f}s" + ("+rest" if row.get("rest_hidden") else ""))
 
         line = " · ".join(parts)
         if row.get("pr"):
@@ -300,6 +300,8 @@ def strava_block(df: pd.DataFrame, header: dict,
         parts += ["", "  ".join(f"{c}{z}" for z, c in ZONE_COLOR.items())]
     parts += ["speed = your own percentile at that distance and stroke",
               "★ = personal best · drill and unknown sets are not ranked"]
+    if "rest_hidden" in df.columns and df["rest_hidden"].fillna(False).astype(bool).any():
+        parts += ["+rest = Polar missed the wall rest; time includes it, not ranked"]
 
     parts += ["", "— polarswim"]
     return "\n".join(parts)

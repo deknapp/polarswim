@@ -327,6 +327,17 @@ def build_reference(engine: Engine, lengths_df: pd.DataFrame) -> SwimmerReferenc
     if lengths_df is None or lengths_df.empty:
         return ref
 
+    # A length that absorbed an unseen rest (see `plan.PlanReading.rest_hidden`)
+    # has no pace in it; ranking it would file a rest as a slow swim, and a rep
+    # holding one would compete for bests on a time nobody swam.
+    if "rest_hidden" in lengths_df.columns:
+        hidden_reps = (lengths_df.loc[lengths_df["rest_hidden"].fillna(False).astype(bool),
+                                      ["workout_id", "rep_id"]].drop_duplicates())
+        if len(hidden_reps):
+            lengths_df = lengths_df.merge(hidden_reps.assign(_hid=True),
+                                          on=["workout_id", "rep_id"], how="left")
+            lengths_df = lengths_df[lengths_df["_hid"].isna()].drop(columns="_hid")
+
     for stroke, g in lengths_df.groupby("predicted"):
         paces = g["pace_s"].dropna().to_numpy()
         if len(paces):

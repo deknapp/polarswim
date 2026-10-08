@@ -86,6 +86,24 @@ def test_a_short_swim_is_relabelled_but_not_stretched():
     assert set(r.stroke.values()) == {"freestyle"}
 
 
+def test_a_rest_polar_did_not_log_is_marked_on_the_length_that_absorbed_it():
+    """25s on a send-off with 10-20 s at the wall that Polar folded into the
+    lengths (2026-10-08): the plan ends each swim, Polar shows no gap, so every
+    length but the last carries a rest and its time is not a pace."""
+    swims = plan.parse_plan("4 x 25 Free @:35")
+    df = _lengths([[34, 35, 33, 23]])
+    r = plan.read(df, swims)
+    assert r.rest_hidden == {1, 2, 3}
+    out = plan.restructure(df, {1: r})
+    assert out["rest_hidden"].tolist() == [True, True, True, False]
+
+
+def test_a_logged_rest_or_a_joined_swim_hides_nothing():
+    rested = plan.read(_lengths([[23], [23]]), plan.parse_plan("2 x 25 Free"))
+    joined = plan.read(_lengths([[34, 23, 22]]), plan.parse_plan("1 x (25 Kick + 50 Free)"))
+    assert rested.rest_hidden == set() and joined.rest_hidden == set()
+
+
 def test_plan_labels_outrank_inference_and_lose_to_corrections():
     df = pd.DataFrame(dict(workout_id=[1, 1], idx=[1, 2],
                            predicted=["backstroke", "backstroke"],

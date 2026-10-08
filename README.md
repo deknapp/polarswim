@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 467 tests, no network
+.venv/bin/pytest -q                                # 473 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -445,6 +445,12 @@ The alignment then does three things:
   its lengths. Its total is kept; only Polar's division of it is replaced.
   Where Polar counted fewer lengths than planned and none of them is a doubled
   length, you swam less than the plan said, and nothing is invented.
+- **Hidden rest.** Where the plan ends a swim but Polar logged no stop before
+  the next, the rest at the wall was folded into the last length. On a set of
+  25s on a send-off this is the norm, not the exception: 10-20 s at the wall,
+  logged as a 35-40 s "length" that reads exactly like slow drill. Those reps
+  show their time with `+rest` on the card and are kept out of personal bests
+  and speed percentiles, since their time is swim plus rest and not a pace.
 
 Planned strokes also train the correction model — but only once planned
 workouts cover all four strokes with at least eight lengths each, AND only if the

@@ -257,6 +257,10 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 # Kept so a caller can tell a split row from a whole set without
                 # comparing counts.
                 "split_from_set": len(runs) > 1,
+                # Its time includes rest Polar did not log, so the pace is not a
+                # pace: shown, flagged, never ranked. See `plan.PlanReading`.
+                "rest_hidden": (bool(sub["rest_hidden"].any())
+                                if "rest_hidden" in sub.columns else False),
             }
             if ref is not None:
                 row["hr_zone"] = ref.hr_zone(_absolute_hr(sub))
@@ -274,14 +278,16 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 partial = (bool(sub["mixed_rep"].any())
                            if "mixed_rep" in sub.columns else False) \
                     and row["stroke"] != "IM"
-                if row["stroke"] in analyze.UNNAMED_STROKES or partial:
+                if row["rest_hidden"]:
+                    row["speed"] = None
+                elif row["stroke"] in analyze.UNNAMED_STROKES or partial:
                     row["speed"] = None
                 elif row["stroke"] == "IM":
                     row["speed"] = ref.im_percentile(rep_yards, rep_seconds)
                 else:
                     row["speed"] = ref.speed_percentile(rep_yards, rep_seconds,
                                                         row["stroke"])
-                row["pr"] = (False if partial else
+                row["pr"] = (False if partial or row["rest_hidden"] else
                              ref.check_pr(rep_yards, row["stroke"], fastest,
                                           int(sub["workout_id"].iloc[0])))
                 row["best_rep_s"] = fastest
