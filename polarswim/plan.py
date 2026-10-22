@@ -744,6 +744,14 @@ class PlanReading:
     # on a send-off the swimmer rested 10-20 s at the wall and Polar folded it
     # into the length, so its time is swim + rest and says nothing about pace.
     rest_hidden: set[int] = field(default_factory=set)
+    # Unplanned lengths before the plan's first swim. The swimmer arrived,
+    # warmed up and doesn't remember how (10/22: fin kick and "other stuff"), so
+    # eleven guessed rows say less than one honest "warm-up".
+    warmup: set[int] = field(default_factory=set)
+    # idx -> the planned yards of its swim, where Polar logged MORE lengths than
+    # the plan holds. Under-counts are left alone: a 200 cut to 150 in traffic
+    # was a 150. An over-count is Polar's extra, and the swimmer's word stands.
+    yards: dict[int, int] = field(default_factory=dict)
 
 
 def read(g: pd.DataFrame, swims: list[Swim],
@@ -759,7 +767,21 @@ def read(g: pd.DataFrame, swims: list[Swim],
     set_no = 0
     prev_key = object()
     hidden = set()
+    warmup, yards = set(), {}
+    started = False
     for seg in segs:
+        if seg.swim_no is None and not started:
+            # Before the plan: one set, whatever the rests say.
+            if not warmup:
+                set_no += 1
+                prev_key = ("warmup",)
+            for i in seg.idxs:
+                if not warmup or g.at[i, "rest_before_s"] > REST_GAP_S:
+                    rep += 1
+                rep_of[i] = rep
+                set_of[i] = set_no
+                warmup.add(i)
+            continue
         if seg.swim_no is None:
             # Unplanned: keep the rest structure the data shows.
             prev_rest = None
@@ -775,6 +797,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
                 set_of[i] = set_no
             continue
 
+        started = True
         s = swims[seg.swim_no]
         rep += 1
         key = ("plan", s.line_no)
@@ -809,6 +832,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
         # the same footing as a rest Polar folded in.
         if len(d) > want:
             hidden.add(seg.idxs[-1])
+            yards.update({i: s.yards for i in seg.idxs})
         for i, t, p in zip(seg.idxs, d, pos):
             rep_of[i] = rep
             set_of[i] = set_no
@@ -828,7 +852,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
                 and g.at[b.idxs[0], "rest_before_s"] <= REST_GAP_S):
             hidden.add(a.idxs[-1])
     return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs, shape,
-                       hidden)
+                       hidden, warmup, yards)
 
 
 def _shape(legs: list[tuple[int, str | None]]) -> str:
@@ -854,8 +878,13 @@ def restructure(df: pd.DataFrame, readings: dict[int, PlanReading]) -> pd.DataFr
         return df
     df = df.copy()
     df["rest_hidden"] = False
+    df["warmup"] = False
+    df["plan_yards"] = np.nan
     for wid, r in readings.items():
         rows = df["workout_id"] == wid
+        df.loc[rows, "warmup"] = [int(i) in r.warmup for i in df.loc[rows, "idx"]]
+        df.loc[rows, "plan_yards"] = [r.yards.get(int(i), np.nan)
+                                      for i in df.loc[rows, "idx"]]
         df.loc[rows, "rep_id"] = [r.rep_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
         df.loc[rows, "set_id"] = [r.set_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
         df.loc[rows, "rest_hidden"] = [int(i) in r.rest_hidden for i in df.loc[rows, "idx"]]

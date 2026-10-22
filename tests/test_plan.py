@@ -354,3 +354,14 @@ def test_parse_reads_options_numbered_reps_and_parity_lines():
 def test_a_numbered_rep_is_not_a_skipped_line_but_a_double_hash_is():
     swims = plan.parse_plan("2 x 125 IM\n##1) 2: 50 Fly + 25 Back + 25 Br + 25 Fr")
     assert all(s.stroke == "IM" and not s.legs for s in swims)
+
+
+def test_before_the_plan_is_one_warm_up_set_and_an_over_count_keeps_plan_yards():
+    swims = plan.parse_plan("1 x 50 Free\n1 x 50 Fly")
+    df = _lengths([[40], [30, 31], [29, 26], [33, 34, 30]])
+    r = plan.read(df, swims)
+    assert r.warmup == {1, 2, 3}
+    assert len({r.set_of[i] for i in (1, 2, 3)}) == 1
+    assert r.yards == {6: 50, 7: 50, 8: 50}
+    out = plan.restructure(df, {1: r})
+    assert out["warmup"].tolist()[:4] == [True, True, True, False]

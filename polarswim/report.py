@@ -142,6 +142,32 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     return learn.apply_labels(df, db.load_labels(engine, workout_id))
 
 
+# Accelerators written `Evens: 25 Fly, 25 Free, 25 Back / Odds: 25 Free, 25
+# Breast, 25 Free` are one set to the swimmer, and six one-rep rows to a table
+# that splits wherever the pattern changes. Single-rep runs of one distance
+# that alternate between two mixed patterns are put back together.
+_ALT_MIN_REPS = 4
+_SHORT = {"free": "fr", "breast": "br", "back": "bk", "fly": "fl"}
+
+
+def _alternating(runs: list[list[dict]]) -> list[list[dict]]:
+    flat = [r[0] for r in runs]
+    pats = [d["pattern"] for d in flat]
+    if (len(runs) >= _ALT_MIN_REPS and all(len(r) == 1 for r in runs)
+            and len({d["yards"] for d in flat}) == 1
+            and None not in pats and pats[0] != pats[1]
+            and all(p == pats[i % 2] for i, p in enumerate(pats))):
+        return [flat]
+    return runs
+
+
+def _alternation_name(run: list[dict]) -> str:
+    """`fr/br/fr ⇄ fl/fr/bk`: both patterns, short enough for one cell."""
+    def short(p):
+        return "/".join(_SHORT.get(x, x) for x in p.split("/"))
+    return f"{short(run[0]['pattern'])} ⇄ {short(run[1]['pattern'])}"
+
+
 def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = None,
                      ref=None) -> list[dict]:
     """Collapse one workout's lengths into rows of equal distance AND stroke.
@@ -183,7 +209,9 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             "rep_id": int(rid),
             "seconds": float(r["duration_s"].sum()),
             "lengths": int(len(r)),
-            "yards": int(round(float(r["length_factor"].sum()) * pool_yd)),
+            "yards": (int(r["plan_yards"].iloc[0])
+                      if "plan_yards" in r.columns and r["plan_yards"].notna().all()
+                      else int(round(float(r["length_factor"].sum()) * pool_yd))),
             # A medley interval is one of each stroke, so its mode is a four-way
             # tie that pandas breaks alphabetically into 'backstroke'. Same trap
             # as the set label, one level down.
@@ -210,6 +238,12 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             else:
                 runs.append([d])
 
+        warmup = "warmup" in g.columns and bool(g["warmup"].all())
+        if warmup:
+            runs = [detail]
+        else:
+            runs = _alternating(runs)
+
         for part, run in enumerate(runs, start=1):
             rep_ids = [d["rep_id"] for d in run]
             sub = g[g["rep_id"].isin(rep_ids)]
@@ -217,6 +251,11 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             n_reps = len(run)
             rep_yards = run[0]["yards"]          # every rep in a run now shares it
             rep_seconds = float(sub_reps["duration_s"].sum().median())
+            if warmup:
+                n_reps, rep_yards = 1, sum(d["yards"] for d in run)
+                rep_seconds = float(sub["duration_s"].sum())
+            elif len({d["pattern"] for d in run}) > 1:
+                run[0] = {**run[0], "pattern": _alternation_name(run)}
             note = "repaired" if repairs and any((r.workout_id, r.idx) in repairs
                                                  for r in sub.itertuples()) else ""
             row = {
@@ -262,6 +301,8 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 "rest_hidden": (bool(sub["rest_hidden"].any())
                                 if "rest_hidden" in sub.columns else False),
             }
+            if warmup:
+                row.update(stroke="other", pattern="warm-up", confidence=1.0)
             if ref is not None:
                 row["hr_zone"] = ref.hr_zone(_absolute_hr(sub))
                 fastest = float(sub_reps["duration_s"].sum().min())
@@ -278,7 +319,7 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 partial = (bool(sub["mixed_rep"].any())
                            if "mixed_rep" in sub.columns else False) \
                     and row["stroke"] != "IM"
-                if row["rest_hidden"]:
+                if row["rest_hidden"] or warmup:
                     row["speed"] = None
                 elif row["stroke"] in analyze.UNNAMED_STROKES or partial:
                     row["speed"] = None
@@ -287,7 +328,7 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 else:
                     row["speed"] = ref.speed_percentile(rep_yards, rep_seconds,
                                                         row["stroke"])
-                row["pr"] = (False if partial or row["rest_hidden"] else
+                row["pr"] = (False if partial or row["rest_hidden"] or warmup else
                              ref.check_pr(rep_yards, row["stroke"], fastest,
                                           int(sub["workout_id"].iloc[0])))
                 row["best_rep_s"] = fastest

@@ -182,7 +182,9 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
         o.append(f'<text x="{PAD}" y="{y}" fill="{FG}" font-size="19" '
                  f'font-weight="600">{s["reps"]}×{s["rep_yards"]}</text>')
         name = s.get("pattern") or STROKE_LABEL.get(s["stroke"], s["stroke"])
-        o.append(f'<text x="{PAD + 120}" y="{y}" fill="{FG}" font-size="17">'
+        # Long names (`fr/br/fr ⇄ fl/fr/bk`) step down a size to stay in the cell.
+        o.append(f'<text x="{PAD + 120}" y="{y}" fill="{FG}" '
+                 f'font-size="{17 if len(name) <= 16 else 14}">'
                  f'{_esc(name)}</text>')
         if s.get("confidence", 1) < 0.4:
             o.append(f'<text x="{PAD + 232}" y="{y}" fill="{PR_GOLD}" '

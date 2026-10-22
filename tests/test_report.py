@@ -292,3 +292,30 @@ class TestTheBestLengthIsNotASensorDefect:
         df = _lengths([(30.0, "freestyle")] * 7 + [(8.5, "freestyle")])
         out = report.pace_summary(df, {"duration_s": 600.0, "distance_m": 182.88})
         assert out["confident"]["best_100_s"] == 120.0
+
+
+def _rows(reps, **cols):
+    rows, idx = [], 0
+    for rid, (strokes, pattern) in enumerate(reps, start=1):
+        for st in strokes:
+            idx += 1
+            rows.append(dict(workout_id=1, idx=idx, set_id=1, rep_id=rid,
+                             duration_s=25.0, pace_s=25.0, pool_m=22.86,
+                             predicted=st, confidence=0.9, pattern=pattern,
+                             hr_cost=0.0, rest_before_s=20.0, **cols))
+    return pd.DataFrame(rows)
+
+
+def test_alternating_accelerators_are_one_row():
+    a = (["freestyle", "breaststroke", "freestyle"], "free/breast/free")
+    b = (["butterfly", "freestyle", "backstroke"], "fly/free/back")
+    sets = report.sets_for_workout(_rows([a, b] * 3))
+    assert len(sets) == 1 and (sets[0]["reps"], sets[0]["rep_yards"]) == (6, 75)
+    assert sets[0]["pattern"] == "fr/br/fr ⇄ fl/fr/bk"
+
+
+def test_a_warm_up_set_is_one_row_of_its_whole_distance():
+    sets = report.sets_for_workout(_rows(
+        [(["freestyle"], None), (["kick", "kick"], None)], warmup=True))
+    assert len(sets) == 1
+    assert (sets[0]["reps"], sets[0]["rep_yards"], sets[0]["pattern"]) == (1, 75, "warm-up")
