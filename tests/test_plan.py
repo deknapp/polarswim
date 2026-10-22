@@ -98,6 +98,14 @@ def test_a_rest_polar_did_not_log_is_marked_on_the_length_that_absorbed_it():
     assert out["rest_hidden"].tolist() == [True, True, True, False]
 
 
+def test_a_swim_polar_logged_long_is_not_a_pace():
+    """10/22: an all-out 50 fly that Polar logged as three lengths in 97.6 s."""
+    swims = plan.parse_plan("1 x 50 Free\n1 x 50 Fly")
+    r = plan.read(_lengths([[29, 26], [33, 34, 30]]), swims)
+    assert r.rest_hidden == {5}
+    assert {r.stroke[i] for i in (3, 4, 5)} == {"butterfly"}
+
+
 def test_a_logged_rest_or_a_joined_swim_hides_nothing():
     rested = plan.read(_lengths([[23], [23]]), plan.parse_plan("2 x 25 Free"))
     joined = plan.read(_lengths([[34, 23, 22]]), plan.parse_plan("1 x (25 Kick + 50 Free)"))

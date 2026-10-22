@@ -758,6 +758,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
     rep = 0
     set_no = 0
     prev_key = object()
+    hidden = set()
     for seg in segs:
         if seg.swim_no is None:
             # Unplanned: keep the rest structure the data shows.
@@ -802,6 +803,12 @@ def read(g: pd.DataFrame, swims: list[Swim],
         else:
             pos = (np.cumsum(d) - d / 2) / d.sum() * s.yards
         bounds = np.cumsum([y for y, _ in legs])
+        # More lengths than the plan holds: the swimmer says 50, Polar logged
+        # three lengths and 97.6 s for an all-out 50 fly (10/22). Something else
+        # ran on into it, so its time is not the swim's and must not rank —
+        # the same footing as a rest Polar folded in.
+        if len(d) > want:
+            hidden.add(seg.idxs[-1])
         for i, t, p in zip(seg.idxs, d, pos):
             rep_of[i] = rep
             set_of[i] = set_no
@@ -815,7 +822,6 @@ def read(g: pd.DataFrame, swims: list[Swim],
             if lopsided and one_stroke:
                 factor[i] = float(t / per_length)
                 kind[i] = "resplit"
-    hidden = set()
     for a, b in zip(segs, segs[1:]):
         if (a.swim_no is not None and b.swim_no is not None and a.idxs and b.idxs
                 and not swims[a.swim_no].joined
