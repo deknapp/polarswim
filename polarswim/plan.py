@@ -153,6 +153,11 @@ _STROKE_WORDS = (
     (r"(?-i:\bBK\b)", "backstroke"),
     (r"(?-i:\bBR\b)", "breaststroke"),
     (r"(?-i:\bFR\b)", "freestyle"),
+    # ...and in title case, `25 Br + 25 Fr`. Still whole words only.
+    (r"(?-i:\b(?:Fl|Fly)\b)", "butterfly"),
+    (r"(?-i:\bBk\b)", "backstroke"),
+    (r"(?-i:\bBr\b)", "breaststroke"),
+    (r"(?-i:\bFr\b)", "freestyle"),
 )
 
 
@@ -185,9 +190,22 @@ _REPEAT = re.compile(r"^\s*(\d+)\s*[x×]\s*(.*)$", re.I)
 # `50`, `50s`, `25's` — the plural is how a coach writes a set of them.
 _DIST = re.compile(r"^\s*(\d{2,4})(?:['’]?s(?![a-z]))?\s*(.*)$", re.I)
 _THRU = re.compile(r"^\s*(\d+)\s*[x×]\s*thr(?:ough|u)\b", re.I)
-_TOTAL = re.compile(r"^\(\s*\d+(?:\s*/\s*\d+)*\s*\)$")
-_TRAILING_TOTAL = re.compile(r"\S.*\(\s*\d{3,}(?:\s*/\s*\d+)*\s*\)\s*$")
-_HEADING = re.compile(r"^[A-Za-z][^:\d]*:\s*(?=\d)")     # `Cool Down: 1 x 200`
+# `(900)`, `(400/200)`, and a whole-workout range `(3400-2250)`.
+_TOTAL = re.compile(r"^\(\s*\d+(?:\s*[/-]\s*\d+)*\s*\)$")
+_TRAILING_TOTAL = re.compile(r"\S.*\(\s*\d{3,}(?:\s*[/-]\s*\d+)*\s*\)\s*$")
+# `Cool Down: 1 x 200`, `Set 2: 12 x 125`
+_HEADING = re.compile(r"^[A-Za-z][A-Za-z ]*(?:\d+)?\s*:\s*(?=\d)")
+# A sheet written for two groups: `12/8 x 125`, `#1) 2/1: ...`. The first number
+# is the long option; a swimmer who did the short one edits the copy.
+_OPTIONS = re.compile(r"(?<![:\d])(\d+)\s*/\s*\d+(?=\s*(?:[x×]|:\s))")
+# `#1) 2/1: 50 Fly + 25 Back + 25 Br + 25 Fr` — numbered reps under a repeat.
+# A numbered item is not a skipped line; `##1)` skips it.
+_ITEM = re.compile(r"^#?\d+\)\s*(.*)$")
+_COUNTED = re.compile(r"^(\d+)\s*:\s*(.*)$")
+# `Evens: 25 Fly, 25 Free, 25 Back` under the repeat it describes.
+_PARITY_LINE = re.compile(r"^(odds?|evens?)\s*:\s*(.*)$", re.I)
+# Separators of a leg list: `50 FL/25 BK`, `50 Fly + 25 Back`, `25 Free, 25 Back`.
+_LEG_SEP = r"\s*[/+,]\s*"
 _IMO = re.compile(r"\bIMO\b|\bIM\s+order\b", re.I)
 
 
@@ -202,7 +220,7 @@ def _legs(desc: str, yards: int, swim_is_free: bool = True) -> list[tuple[int, s
     Back/Even Breast` also has slashes in it.
     """
     desc = desc.lstrip(": ")
-    parts = [p for p in re.split(r"\s*/\s*", desc) if p.strip()]
+    parts = [p for p in re.split(_LEG_SEP, desc) if p.strip()]
     if len(parts) < 2:
         return []
     out = []
@@ -217,7 +235,7 @@ def _legs(desc: str, yards: int, swim_is_free: bool = True) -> list[tuple[int, s
 def _leg_line(line: str) -> list[tuple[int, str | None]]:
     """A line that is nothing but legs, written under a repeat to spell out each rep."""
     total = 0
-    parts = [p for p in re.split(r"\s*/\s*", line) if p.strip()]
+    parts = [p for p in re.split(_LEG_SEP, line) if p.strip()]
     for p in parts:
         m = _DIST.match(p)
         if not m or not m.group(2).strip():
@@ -241,7 +259,9 @@ def _pieces(body: str) -> list[tuple[int, str]]:
 
 _SWIM_STROKES = set(IM_ORDER)
 # `2x (8 x 25) R1-Breast & R2-Fly`: rounds of a repeat, each round its own stroke.
-_NESTED = re.compile(r"^\s*(\d+)\s*[x×]\s*\(\s*(\d+)\s*[x×]\s*(\d{2,4})\s*\)\s*(.*)$", re.I)
+# `6 x (2 x 75 Accelerators)`: the same, with a name inside the brackets.
+_NESTED = re.compile(
+    r"^\s*(\d+)\s*[x×]\s*\(\s*(\d+)\s*[x×]\s*(\d{2,4})\b([^)]*)\)\s*(.*)$", re.I)
 _ROUND_NAME = re.compile(r"\bR(\d)\s*[-:]\s*([A-Za-z]+)")
 # `R1: Odd 1 Pull-2 Kick/Even Breast DPS` — what each rep of round 1 is.
 _ROUND_LINE = re.compile(r"^\s*R(\d)\s*:\s*(.*)$")
@@ -288,7 +308,7 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
         line_wo = line[:m.start()]
     else:
         line_wo = line
-    line_wo = re.sub(r"\(\s*\d+(?:\s*/\s*\d+)*\s*\)\s*$", "", line_wo).strip()
+    line_wo = re.sub(r"\(\s*\d+(?:\s*[/-]\s*\d+)*\s*\)\s*$", "", line_wo).strip()
     line_wo = _HEADING.sub("", line_wo)
 
     rm = _REPEAT.match(line_wo)
@@ -300,6 +320,12 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
         if inner and sum(y for y, _ in inner) == int(dm.group(1)):
             body = dm.group(2)
     pieces = _pieces(body)
+    # `200 Swim 200 Kick 200 Pull`: several swims run together on one line.
+    if reps == 1 and not re.search(r"[+/:]", body):
+        run = re.split(r"\s+(?=\d{2,4}\s+[A-Za-z])", body.strip())
+        if len(run) >= 2 and all((m := _DIST.match(p)) and m.group(2)[:1].isalpha()
+                                 for p in run):
+            pieces = [(int(_DIST.match(p).group(1)), _DIST.match(p).group(2)) for p in run]
     # A compound of nothing but swim strokes — `(75 FR + 25 Fly + 75 FR + 25 BK)`,
     # `(25 Fast Free + 25 Fly)` — is one unbroken swim of legs. One with kick or
     # drill in it (`25 Kick + 50 Swim`) stays separate swims that may run on.
@@ -371,7 +397,37 @@ def parse_plan(text: str) -> list[Swim]:
 
     for line_no, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
-        if not line or line.startswith("#"):
+        item = _ITEM.match(line)
+        if item:
+            line = item.group(1)
+        if not line or line.startswith("#") or _TOTAL.match(line):
+            continue
+        line = _OPTIONS.sub(r"\1", line)
+        # `2: 50 Fly + 25 Back + 25 Br + 25 Fr` spells out the next two reps.
+        cm = _COUNTED.match(line) if item else None
+        if cm:
+            legs = _leg_line(cm.group(2))
+            if legs and pending:
+                for _ in range(int(cm.group(1))):
+                    if not pending or pending[0].yards != sum(y for y, _ in legs):
+                        break
+                    s = pending.pop(0)
+                    s.legs = list(legs)
+                    strokes = {st for _, st in legs}
+                    s.stroke = strokes.pop() if len(strokes) == 1 else None
+            continue
+        pm = _PARITY_LINE.match(line)
+        if pm and last_line:
+            legs = _leg_line(pm.group(2))
+            st = None if legs else _stroke_of(pm.group(2))
+            first = 0 if pm.group(1).lower().startswith("odd") else 1
+            for sw in last_line[first::2]:
+                if legs and sum(y for y, _ in legs) == sw.yards:
+                    sw.legs = list(legs)
+                    strokes = {x for _, x in legs}
+                    sw.stroke = strokes.pop() if len(strokes) == 1 else None
+                elif st:
+                    sw.stroke = st
             continue
         t = _THRU.match(line)
         if t:
@@ -394,9 +450,10 @@ def parse_plan(text: str) -> list[Swim]:
                 if alt:
                     sw.stroke = alt[r % 2]
             continue
-        nm = _NESTED.match(_BASE.sub("", line))
+        nm = _NESTED.match(_HEADING.sub("", _BASE.sub("", line)))
         if nm:
-            k, n, yards, rest = int(nm.group(1)), int(nm.group(2)), int(nm.group(3)), nm.group(4)
+            k, n, yards = int(nm.group(1)), int(nm.group(2)), int(nm.group(3))
+            rest = (nm.group(4) + " " + nm.group(5)).strip()
             names = {int(i): _stroke_of(w) for i, w in _ROUND_NAME.findall(rest)}
             got, rounds_of = [], {}
             for rnd in range(1, k + 1):

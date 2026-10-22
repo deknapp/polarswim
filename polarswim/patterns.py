@@ -160,6 +160,9 @@ class PatternMatch:
     source: str
     block: int = 0                  # consecutive matched reps share a block number
     part: int = 0                   # which rung, where one rep held two; else 0
+    # The stroke of every record, where the legs are not all one length — a 125
+    # IM swims one stroke for 50. None when `leg_lengths` divides the rep evenly.
+    per_length: tuple[str, ...] | None = None
 
     @property
     def name(self) -> str:
@@ -185,7 +188,13 @@ class PatternMatch:
         """Which stroke covers record `idx`, or None if this rep does not."""
         if idx not in self.idxs:
             return None
-        return self.legs[self.idxs.index(idx) // self.leg_lengths]
+        return self.stroke_at(self.idxs.index(idx))
+
+    def stroke_at(self, pos: int) -> str:
+        """The stroke of the rep's `pos`-th record."""
+        if self.per_length is not None:
+            return self.per_length[pos]
+        return self.legs[pos // self.leg_lengths]
 
 
 # --- profile ---------------------------------------------------------------
@@ -384,6 +393,75 @@ def match_rep(g: pd.DataFrame, profile: Profile) -> PatternMatch | None:
         idxs=[int(i) for i in g["idx"]], score=round(err, 4),
         margin=round(float(margin), 2), confidence=round(min(0.95, max(0.35, conf)), 3),
         source=profile.source)
+
+
+# --- uneven medleys --------------------------------------------------------
+# A 125 IM swims one of the four strokes for 50: `50 Fly + 25 Back + 25 Br +
+# 25 Fr`. Five records cannot be cut into four equal legs, so `match_rep` never
+# sees it, and a pace fit could not read it anyway: this swimmer's fly, back and
+# breast all run about 29 s a length, so "five lengths of one stroke" fits the
+# rep nearly as well as any medley does (2026-10-22: eight 125 IMs read as
+# freestyle and breaststroke).
+#
+# What does mark it is the finish. The free leg is the one fast stroke, and it
+# comes last: a run of slow lengths and then a clearly quicker one or two. The
+# test is on the GAP, not the order alone — the slowest free length must beat
+# the fastest non-free one by `UNEVEN_MIN_SEP` — and the non-free lengths must
+# sit well above the day's own freestyle, which is what keeps out a free 125
+# with a sprint finish (its slow lengths are just ordinary free). Across the
+# history this fires on four of 10/22's eight 125s and on 9/28 lengths 58-62,
+# a planned 125 IM; nothing else on a plan day.
+#
+# Which stroke got the extra 25 is read from pace against the profile, which is
+# weak, but every reading shares three of its four non-free labels with the
+# truth's at worst, so a wrong guess costs one length rather than the rep.
+UNEVEN_LENGTHS = 5
+UNEVEN_MIN_SEP = 1.10
+UNEVEN_MIN_DAY_RATIO = 1.15
+UNEVEN_CONFIDENCE = 0.55
+
+
+def match_uneven(g: pd.DataFrame, profile: Profile) -> PatternMatch | None:
+    """Read a five-length rep as an IM with one stroke swum for two lengths."""
+    if len(g) != UNEVEN_LENGTHS or not profile.usable():
+        return None
+    g = g.sort_values("idx")
+    pool_m = float(g["pool_m"].iloc[0])
+    if pool_m <= 0 or abs(pool_m / 0.9144 - 25.0) > LEG_TOLERANCE_YD:
+        return None
+    pace = g["duration_s"].to_numpy(dtype=float) * REFERENCE_LENGTH_M / pool_m
+    if not np.isfinite(pace).all() or pace.min() <= 0:
+        return None
+    ref = float(g["free_ref_s"].iloc[0]) if "free_ref_s" in g.columns else np.nan
+
+    best = None
+    for n_free in (1, 2):
+        slow, fast = pace[:-n_free], pace[-n_free:]
+        # Rounded: lengths come in 0.8 s steps, so 26.4 / 24.0 is exactly 1.10.
+        sep = round(float(slow.min() / fast.max()), 3)
+        if sep < UNEVEN_MIN_SEP:
+            continue
+        if np.isfinite(ref) and float(np.median(slow)) < ref * UNEVEN_MIN_DAY_RATIO:
+            continue
+        doubled = (3,) if n_free == 2 else (0, 1, 2)
+        for d in doubled:
+            seq = tuple(st for i, st in enumerate(IM_ORDER)
+                        for _ in range(2 if i == d else 1))
+            pred = np.array([profile.pace[st] for st in seq])
+            err = float(np.mean(np.abs(pace - pred) / pred))
+            if best is None or (sep, -err) > (best[0], -best[1]):
+                best = (sep, err, seq)
+    if best is None:
+        return None
+    sep, err, seq = best
+    return PatternMatch(
+        workout_id=int(g["workout_id"].iloc[0]), rep_id=int(g["rep_id"].iloc[0]),
+        set_id=int(g["set_id"].iloc[0]) if "set_id" in g.columns else 0,
+        legs=IM_ORDER, leg_lengths=1,
+        leg_pace_s=[round(float(x), 2) for x in pace],
+        idxs=[int(i) for i in g["idx"]], score=round(err, 4),
+        margin=round(float(sep), 2), confidence=UNEVEN_CONFIDENCE,
+        source=profile.source, per_length=seq)
 
 
 # --- blocks -----------------------------------------------------------------
@@ -841,6 +919,20 @@ def detect_patterns(df: pd.DataFrame,
                 seed.block = block_no
                 claimed.add(seed.rep_id)
                 out.append(seed)
+        for rid, g in reps.items():
+            if rid in claimed:
+                continue
+            # Two 125s with the rest between them folded into a length (10/22
+            # lengths 42-51) arrive as one rep of ten; both halves must read.
+            halves = [g] if len(g) != 2 * UNEVEN_LENGTHS else \
+                [g.iloc[:UNEVEN_LENGTHS], g.iloc[UNEVEN_LENGTHS:]]
+            found = [match_uneven(h, profile) for h in halves]
+            if found and all(m is not None for m in found):
+                block_no += 1
+                for m in found:
+                    m.block = block_no
+                    out.append(m)
+                claimed.add(rid)
 
     out.sort(key=lambda m: (m.workout_id, m.idxs[0]))
     return out
@@ -878,7 +970,7 @@ def label_patterns(df: pd.DataFrame, matches: list[PatternMatch]) -> pd.DataFram
         mixed = len(m.legs) >= MIN_LEGS
         for pos, idx in enumerate(m.idxs):
             labels[(m.workout_id, idx)] = (
-                m.legs[pos // m.leg_lengths], m.confidence,
+                m.stroke_at(pos), m.confidence,
                 # A single-leg member of a block is not a pattern, it is a rep
                 # whose stroke the block happened to identify. Naming it one
                 # would cost it its own personal best: the 50 fly that opens an

@@ -305,3 +305,44 @@ def test_inserts_land_where_the_slow_lengths_are():
     r = plan.read(df, swims)
     assert [r.stroke[i] for i in range(1, 9)] == (
         ["freestyle"] * 3 + ["butterfly"] + ["freestyle"] * 3 + ["backstroke"])
+
+
+# The coach's PDF for 2026-10-22, as `pdftotext -layout` gives it (abridged).
+SMORGASBORD = """\
+Smorgasbord             Wednesday & Thursday IMs
+(3400-2250)
+
+Warm Up: 200 Swim 200 Kick 200 Pull                  (600)
+
+Set 2: 12/8 x 125 IM    R:20s             (1500/1000)
+#1) 2/1: 50 Fly + 25 Back + 25 Br + 25 Fr
+#2) 2/1: 25 Fly + 50 Back + 25 Br + 25 Fr
+#3) 2/1: 25 Fly + 25 Back + 50 Br + 25 Fr
+#4) 2/1: 25 Fly + 25 Back + 25 Br + 50 Fr
+#9/5-#12/8) RIMO or Two lengths LEAST FAVORITE
+
+Set 3: 6/3 x (2 x 75 Accelerators) R:20s         (900/450)
+Evens: 25 Fly, 25 Free, 25 Back
+Odds: 25 Free, 25 Breast, 25 Free
+"""
+
+
+def test_parse_reads_options_numbered_reps_and_parity_lines():
+    swims = plan.parse_plan(SMORGASBORD)
+    assert [(s.yards, s.stroke) for s in swims[:3]] == [
+        (200, "freestyle"), (200, "kick"), (200, "freestyle")]     # run-on line
+    ims = [s for s in swims if s.yards == 125]
+    assert len(ims) == 12                                         # `12/8` -> 12
+    assert ims[0].legs == ims[1].legs == [
+        (50, "butterfly"), (25, "backstroke"), (25, "breaststroke"), (25, "freestyle")]
+    assert ims[7].legs[3] == (50, "freestyle")
+    assert all(s.stroke == "IM" and not s.legs for s in ims[8:])  # #9-#12 unspelled
+    acc = [s for s in swims if s.yards == 75]
+    assert len(acc) == 12                                         # 6 x (2 x 75)
+    assert [st for _, st in acc[0].legs] == ["freestyle", "breaststroke", "freestyle"]
+    assert [st for _, st in acc[1].legs] == ["butterfly", "freestyle", "backstroke"]
+
+
+def test_a_numbered_rep_is_not_a_skipped_line_but_a_double_hash_is():
+    swims = plan.parse_plan("2 x 125 IM\n##1) 2: 50 Fly + 25 Back + 25 Br + 25 Fr")
+    assert all(s.stroke == "IM" and not s.legs for s in swims)

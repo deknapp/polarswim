@@ -406,3 +406,35 @@ class TestPipelineWiring:
         assert first["predicted"].tolist() == ["butterfly", "butterfly"]
         assert first["pattern"].isna().all()
         assert not first["mixed_rep"].any()
+
+
+class TestUnevenMedley:
+    """A 125 IM swims one stroke for 50, so it has five records and no equal legs."""
+
+    def _ref(self, df, ref=24.0):
+        df["free_ref_s"] = ref
+        return df
+
+    def test_a_125_im_is_read_by_its_fast_free_finish(self):
+        # 10/22 lengths 22-26: 50 fly / 25 back / 25 breast / 25 free.
+        m = patterns.match_uneven(self._ref(_rep([28.0, 27.2, 29.6, 28.8, 22.4])), PROFILE)
+        assert m is not None and m.is_medley
+        assert [m.label_for(i) for i in range(1, 6)] == [
+            "butterfly", "butterfly", "backstroke", "breaststroke", "freestyle"]
+
+    def test_a_50_free_finish_doubles_the_free(self):
+        m = patterns.match_uneven(self._ref(_rep([28.0, 31.2, 31.2, 23.2, 24.8])), PROFILE)
+        assert m is not None and m.per_length[-2:] == ("freestyle", "freestyle")
+
+    def test_steady_free_and_a_sprint_finish_on_free_pace_are_not_medleys(self):
+        assert patterns.match_uneven(self._ref(_rep([24.0] * 5)), PROFILE) is None
+        # Slow lengths that are only ordinary free for the day: not a medley.
+        assert patterns.match_uneven(
+            self._ref(_rep([25.6, 24.8, 25.6, 24.8, 20.0]), ref=24.0), PROFILE) is None
+
+    def test_two_125s_polar_ran_together_are_both_read(self):
+        reps = [[26.4, 30.4, 29.6, 33.6, 22.4, 38.4, 30.4, 31.2, 30.4, 24.0]]
+        w = self._ref(_workout(reps))
+        found = [m for m in patterns.detect_patterns(
+            w, {s: v / 22.0 for s, v in PROFILE.pace.items()}, []) if m.per_length]
+        assert [m.idxs for m in found] == [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
