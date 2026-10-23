@@ -1007,6 +1007,11 @@ def analyze(engine: Engine, workout_id: int | None = None,
     df = assign_sets(df)
     readings = plan_.load_readings(engine, df, prior_ratios)
     df = plan_.restructure(df, readings)
+    # Where there is no plan, a set swum on a send-off still has a clock in it,
+    # and the clock says where reps start when Polar logged no rest. See `sendoff`.
+    from . import sendoff
+    trains = sendoff.find_trains(df[~df["workout_id"].isin(list(readings))])
+    df = sendoff.recut(df, trains)
     df = add_features(df, hr)
 
     # Repair first, then classify. An uncorrected merge carries a doubled time and
@@ -1079,8 +1084,13 @@ def analyze(engine: Engine, workout_id: int | None = None,
     found = ins.detect_inserts(df)
     matches = ins.without_inserts(plan_.without_planned(
         pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings), found)
+    # An odd/even reading of a send-off train outranks both: it reads the rep
+    # boundaries Polar missed, which the medley windows were matched across.
+    parity = sendoff.read_parity(df, trains, ratios)
+    matches = sendoff.without_trains(matches, parity)
     df = pat.label_patterns(df, matches)
     df = ins.label_inserts(df, found)
+    df = sendoff.label_parity(df, parity)
 
     # After every automatic step and before the swimmer's own word: a rep is one
     # stroke, but a correction may say otherwise and must still win.

@@ -107,6 +107,9 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     df = analyze.assign_sets(df)
     readings = plan_.load_readings(engine, df, pat.from_params(stored))
     df = plan_.restructure(df, readings)
+    from . import sendoff
+    trains = sendoff.find_trains(df[~df["workout_id"].isin(list(readings))])
+    df = sendoff.recut(df, trains)
     hr = analyze.load_hr(engine, sorted(df["workout_id"].unique().tolist()))
     df = analyze.add_features(df, hr)
     # Repairs are applied here too, so the card, the image and the web UI all
@@ -134,8 +137,10 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     # one workout must not pay for a full-database pass.
     from . import patterns as pat
     ratios = pat.from_params(params)
-    df = pat.label_patterns(df, plan_.without_planned(pat.detect_patterns(df, ratios),
-                                                      readings))
+    parity = sendoff.read_parity(df, trains, ratios)
+    df = pat.label_patterns(df, sendoff.without_trains(
+        plan_.without_planned(pat.detect_patterns(df, ratios), readings), parity))
+    df = sendoff.label_parity(df, parity)
 
     df = analyze.enforce_rep_consistency(df)
     df = plan_.apply_labels(df, plan_.labels(readings), plan_.shapes(readings))
@@ -239,8 +244,16 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 runs.append([d])
 
         warmup = "warmup" in g.columns and bool(g["warmup"].all())
+        parity = ("parity" in g.columns and g["parity"].notna().all()
+                  and g["parity"].nunique() == 2)
         if warmup:
             runs = [detail]
+        elif parity:
+            # An odd/even set on a send-off (see `sendoff`): the swimmer wrote
+            # it as one line, and its two halves are two swims — the free 50s
+            # rank as free 50s, the IM 50s as nothing.
+            half = g.groupby("rep_id")["parity"].first()
+            runs = [[d for d in detail if half[d["rep_id"]] == p] for p in (0.0, 1.0)]
         else:
             runs = _alternating(runs)
 
@@ -251,6 +264,15 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
             n_reps = len(run)
             rep_yards = run[0]["yards"]          # every rep in a run now shares it
             rep_seconds = float(sub_reps["duration_s"].sum().median())
+            hidden = (bool(sub["rest_hidden"].any())
+                      if "rest_hidden" in sub.columns else False)
+            if parity and hidden:
+                # Reps whose time is swim alone speak for the row; only when
+                # every rep carries a rest is the row's pace not a pace.
+                clean = sub_reps.filter(lambda r: not r["rest_hidden"].any())
+                if len(clean):
+                    rep_seconds = float(clean.groupby("rep_id")["duration_s"].sum().median())
+                    hidden = False
             if warmup:
                 n_reps, rep_yards = 1, sum(d["yards"] for d in run)
                 rep_seconds = float(sub["duration_s"].sum())
@@ -298,8 +320,7 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 "split_from_set": len(runs) > 1,
                 # Its time includes rest Polar did not log, so the pace is not a
                 # pace: shown, flagged, never ranked. See `plan.PlanReading`.
-                "rest_hidden": (bool(sub["rest_hidden"].any())
-                                if "rest_hidden" in sub.columns else False),
+                "rest_hidden": hidden,
             }
             if warmup:
                 row.update(stroke="other", pattern="warm-up", confidence=1.0)

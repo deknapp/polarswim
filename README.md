@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 483 tests, no network
+.venv/bin/pytest -q                                # 492 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -451,6 +451,19 @@ The alignment then does three things:
   logged as a 35-40 s "length" that reads exactly like slow drill. Those reps
   show their time with `+rest` on the card and are kept out of personal bests
   and speed percentiles, since their time is swim plus rest and not a pace.
+
+**Without a plan: the send-off clock** (`sendoff.py`). A set swum on a send-off
+has a clock in it that Polar ignores: every rep starts on the minute, so a rep
+starts wherever a length starts on the minute, rest logged or not. Eight or more
+reps on a five-second-grid send-off, the same distance each, a rest Polar saw
+before at least a third of them, are read as one set: reps re-cut on the clock,
+a sat-out rep kept as a hole so the count stays right, extra rest mid-set taken
+as a re-phase. Then odd against even: when one half runs at freestyle pace and
+the other clearly slower, the fast half is freestyle; if the slow half splits
+again into two groups, it is read as the two non-free medley pairs (fly/back,
+back/breast). On 2026-10-23's `25 x 50 @ 1:00, odd free / even IM` the
+label-free detector went from 48% to 96% of lengths; history-wide it fires on
+six sets and changes one length.
 
 Planned strokes also train the correction model — but only once planned
 workouts cover all four strokes with at least eight lengths each, AND only if the
