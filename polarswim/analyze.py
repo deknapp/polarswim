@@ -1082,14 +1082,19 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # `75 FR + 25 Fly + 75 FR + 25 BK` otherwise reads as a 200 IM in 50s.
     from . import inserts as ins
     found = ins.detect_inserts(df)
-    matches = ins.without_inserts(plan_.without_planned(
-        pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings), found)
+    # ...and so is a swim of whole legs of free and one other stroke (`75 Back/
+    # 150 Free/75 Back`), which is too much of the other stroke to be inserts.
+    from . import blocks as blk
+    blocked = blk.detect_blocks(df, params, skip={(r.workout_id, r.rep_id) for r in found})
+    matches = blk.without_blocks(ins.without_inserts(plan_.without_planned(
+        pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings), found), blocked)
     # An odd/even reading of a send-off train outranks both: it reads the rep
     # boundaries Polar missed, which the medley windows were matched across.
     parity = sendoff.read_parity(df, trains, ratios)
     matches = sendoff.without_trains(matches, parity)
     df = pat.label_patterns(df, matches)
     df = ins.label_inserts(df, found)
+    df = blk.label_blocks(df, blocked)
     df = sendoff.label_parity(df, parity)
 
     # After every automatic step and before the swimmer's own word: a rep is one

@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 494 tests, no network
+.venv/bin/pytest -q                                # 498 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -464,6 +464,18 @@ again into two groups, it is read as the two non-free medley pairs (fly/back,
 back/breast). On 2026-10-23's `25 x 50 @ 1:00, odd free / even IM` the
 label-free detector went from 48% to 96% of lengths; history-wide it fires on
 six sets and changes one length.
+
+**Without a plan: blocks of another stroke** (`blocks.py`). `300 Swim (75
+Back/150 Free/75 Back)` swum unbroken is one rep, and a rep was one stroke, so
+it read as a 300 free. Cut into whole 50s, 75s or 100s and read at each unit's
+median (a misplaced turn moves time between two lengths of one unit), such a
+swim falls into two pace levels with a clean gap, its fast level the day's
+freestyle, in a coach's layout: alternating, the other stroke at both ends, or
+first. A descending or tiring free swim has no gap, or slows at the end, and is
+left alone. The slow stroke is named from the learned back/breast split only
+when it clears it — pooled over the workout's block swims, since a set is
+written around one stroke — and is `undetermined` otherwise. History-wide it
+fires on four swims, three of them 2026-10-30's back/free set.
 
 Planned strokes also train the correction model — but only once planned
 workouts cover all four strokes with at least eight lengths each, AND only if the
