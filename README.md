@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 498 tests, no network
+.venv/bin/pytest -q                                # 499 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -451,6 +451,9 @@ The alignment then does three things:
   logged as a 35-40 s "length" that reads exactly like slow drill. Those reps
   show their time with `+rest` on the card and are kept out of personal bests
   and speed percentiles, since their time is swim plus rest and not a pace.
+  The same goes for a swim with one length far over what the stroke costs
+  (1.45x) and no short length beside it: a misplaced turn moves time between
+  lengths, a folded rest adds it (2026-10-30: a fast 50 back logged 51.2 / 32.0).
 
 **Without a plan: the send-off clock** (`sendoff.py`). A set swum on a send-off
 has a clock in it that Polar ignores: every rep starts on the minute, so a rep

@@ -117,6 +117,14 @@ REST_GAP_S = 2.0                 # same boundary `analyze` uses
 # history's 50s split 1.06 : 1 on the median, so this is far outside ordinary
 # pacing; 28.8 / 18.4 = 1.57 is what it is there to catch.
 RESPLIT_RATIO = 1.25
+# ...but not every lopsided swim is a misplaced turn. On 2026-10-30 a fast 50
+# back went 51.2 / 32.0: one length half again what the stroke costs and no
+# short one to make up for it, so ~20 s at the wall went into the first length.
+# A misplaced turn leaves a short length beside the long one; a folded rest
+# does not. Read against the stroke's expected length time from the day's
+# freestyle, since a 50 has no "other lengths" to compare with.
+HIDDEN_LONG_RATIO = 1.45
+HIDDEN_SHORT_RATIO = 0.85
 
 
 # --- parsing ----------------------------------------------------------------
@@ -843,6 +851,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
     segs = align(g, swims, ratios, hr)
     g = g.set_index("idx")
     pool_yd = float(g["pool_m"].iloc[0]) / 0.9144
+    free_ref = float(np.percentile(g["duration_s"].to_numpy(dtype=float), 15))
     stroke, factor, kind, rep_of, set_of, label = {}, {}, {}, {}, {}, {}
     shape: dict[int, str] = {}
 
@@ -916,6 +925,11 @@ def read(g: pd.DataFrame, swims: list[Swim],
         if len(d) > want:
             hidden.add(seg.idxs[-1])
             yards.update({i: s.yards for i in seg.idxs})
+        elif lopsided and one_stroke and legs[0][1] is not None:
+            expect = free_ref * ((ratios or {}).get(legs[0][1])
+                                 or EXPECTED_RATIO.get(legs[0][1], 1.12))
+            if d.max() >= HIDDEN_LONG_RATIO * expect and d.min() >= HIDDEN_SHORT_RATIO * expect:
+                hidden.add(seg.idxs[-1])
         for i, t, p in zip(seg.idxs, d, pos):
             rep_of[i] = rep
             set_of[i] = set_no

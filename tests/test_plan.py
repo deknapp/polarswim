@@ -106,6 +106,16 @@ def test_a_swim_polar_logged_long_is_not_a_pace():
     assert {r.stroke[i] for i in (3, 4, 5)} == {"butterfly"}
 
 
+def test_a_long_length_with_no_short_one_beside_it_holds_a_rest():
+    """10/30: a fast 50 back logged 51.2 / 32.0 — ~20 s at the wall folded in."""
+    swims = plan.parse_plan("4 x 50 Free\n1 x 50 Back")
+    folded = plan.read(_lengths([[23, 22]] * 4 + [[51.2, 32.0]]), swims)
+    assert folded.rest_hidden == {10}
+    # A misplaced turn moves time, it does not add it: 40 / 24 is not a rest.
+    turned = plan.read(_lengths([[23, 22]] * 4 + [[40.0, 24.0]]), swims)
+    assert turned.rest_hidden == set()
+
+
 def test_a_logged_rest_or_a_joined_swim_hides_nothing():
     rested = plan.read(_lengths([[23], [23]]), plan.parse_plan("2 x 25 Free"))
     joined = plan.read(_lengths([[34, 23, 22]]), plan.parse_plan("1 x (25 Kick + 50 Free)"))
