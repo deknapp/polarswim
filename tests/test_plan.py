@@ -116,6 +116,20 @@ def test_a_long_length_with_no_short_one_beside_it_holds_a_rest():
     assert turned.rest_hidden == set()
 
 
+def test_a_slow_single_25_can_hold_a_rest_rather_than_steal_from_the_next_swim():
+    """10/30: back-drill 25s of 56 s and 45 s (rest folded in), then a 200."""
+    swims = plan.parse_plan("Drill:\n1x (4 x 25)\n200 Swim (Odd 50 Back/Even 50 Free)")
+    df = _lengths([[38.4], [34.4, 56.0, 44.8], [30.4, 29.6, 26.4, 25.6, 28.0, 32.8, 24.0, 23.0]])
+    segs = plan.align(df, swims)
+    assert [s.idxs for s in segs if s.swim_no is not None][-1] == list(range(5, 13))
+
+
+def test_a_missed_wall_shows_the_planned_distance():
+    swims = plan.parse_plan("1 x 50 Kick\n3 x 25 Kick\n1 x 200 Free")
+    r = plan.read(_lengths([[76.8], [36.0], [36.8], [36.8], [24] * 8]), swims)
+    assert r.yards == {1: 50}
+
+
 def test_a_logged_rest_or_a_joined_swim_hides_nothing():
     rested = plan.read(_lengths([[23], [23]]), plan.parse_plan("2 x 25 Free"))
     joined = plan.read(_lengths([[34, 23, 22]]), plan.parse_plan("1 x (25 Kick + 50 Free)"))

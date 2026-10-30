@@ -102,6 +102,7 @@ COST_BROKEN = 0.6                # a stop inside a swim (traffic, short wall)
 # 200 is never stretched across a two-minute rest.
 BROKEN_FREE_S = 20.0
 COST_BROKEN_PER_S = 0.08
+SLOW_SINGLE_Z = 2.0             # see `swim_cost`: a slow single 25 may hold rest
 COST_SENDOFF = 0.04              # per second outside the send-off tolerance
 SENDOFF_TOLERANCE_S = 8.0
 # Heart rate, used for the two swims where it is unambiguous: butterfly is the
@@ -269,8 +270,17 @@ def _bracket_legs(inner: str, yards: int, outer: str = "") -> list[tuple[int, st
     if m:
         n, k, st = int(m.group(1)), int(m.group(2)), _stroke_of(m.group(3))
         base = _stroke_of(outer) or "freestyle"
-        if n >= 2 and st and st != base and yards % (n * k) == 0:
-            return [(k * (n - 1), base), (k, st)] * (yards // (n * k))
+        if n >= 2 and st and st != base and yards % k == 0:
+            # A swim cut short (`125 Swim (Every 4th 25 Back)`) keeps the pattern
+            # as far as it went.
+            out, left = [], yards
+            while left > 0:
+                for y, x in ((k * (n - 1), base), (k, st)):
+                    y = min(y, left)
+                    if y:
+                        out.append((y, x))
+                        left -= y
+            return out
     return []
 
 
@@ -372,7 +382,7 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
             f"{y} {_SHORT_NAME.get(st, st or 'choice')}" for y, st in paren_legs)
     pieces = _pieces(body)
     # `200 Swim 200 Kick 200 Pull`: several swims run together on one line.
-    if reps == 1 and not re.search(r"[+/:]", body):
+    if reps == 1 and not re.search(r"[+/:(]", body):
         run = re.split(r"\s+(?=\d{2,4}\s+[A-Za-z])", body.strip())
         if len(run) >= 2 and all((m := _DIST.match(p)) and m.group(2)[:1].isalpha()
                                  for p in run):
@@ -722,6 +732,11 @@ def align(g: pd.DataFrame, swims: list[Swim],
         # pace per planned length, so a missed wall does not read as slow swimming
         pace = (csum[i + k] - csum[i]) / cover * norm
         z = math.log(pace / (free_ref * exp)) / sigma
+        # A single length that ran slow may hold a rest Polar folded in (a 56 s
+        # back-drill 25 on 10/30): slow there costs little more than two sigma.
+        # Fast cannot be explained that way, so that side stays full price.
+        if want == 1 and z > 0:
+            z = min(z, SLOW_SINGLE_Z)
         c += 0.5 * min(z * z, 16.0)
         c += leg_cost(s, i, k, want)
         pct = hr_pct(i, k) if (s.stroke == "butterfly" or s.easy) else None
@@ -930,6 +945,14 @@ def read(g: pd.DataFrame, swims: list[Swim],
                                  or EXPECTED_RATIO.get(legs[0][1], 1.12))
             if d.max() >= HIDDEN_LONG_RATIO * expect and d.min() >= HIDDEN_SHORT_RATIO * expect:
                 hidden.add(seg.idxs[-1])
+        elif len(d) < want and one_stroke:
+            # Fewer records than lengths, but enough time for all of them: a
+            # 50 kick logged as one 76.8 s "length" (10/30) is a missed wall, so
+            # the card shows the 50 the swimmer swam, not a 25.
+            expect = free_ref * ((ratios or {}).get(legs[0][1])
+                                 or EXPECTED_RATIO.get(legs[0][1], 1.12))
+            if sum(max(1, round(x / expect)) for x in d) >= want:
+                yards.update({i: s.yards for i in seg.idxs})
         for i, t, p in zip(seg.idxs, d, pos):
             rep_of[i] = rep
             set_of[i] = set_no
