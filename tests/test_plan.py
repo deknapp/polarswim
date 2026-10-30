@@ -365,3 +365,44 @@ def test_before_the_plan_is_one_warm_up_set_and_an_over_count_keeps_plan_yards()
     assert r.yards == {6: 50, 7: 50, 8: 50}
     out = plan.restructure(df, {1: r})
     assert out["warmup"].tolist()[:4] == [True, True, True, False]
+
+
+MONSTER_MASH = """\
+Warm up: (600)
+400 Swim (Every 4th 25 Back)
+Backstroke Drills: w/cup on forehead (600)
+3x (4 x 25)
+    R1)“Log Roll” R2) “Canoe” R3)“Shoulder Tap”
+1x thru: (900)
+200 Swim (Odd 50 Back/Even 50 Free) R:10”
+300 Swim (75 Back/150 Free/75 Back) R:10”
+2x or 1x thru: (900/450)
+2 x 150 (50 Free/50 Back/50 Free) R:10” (3000/2550)
+Bonus: 4x thru (200)
+2x :30 “Frankenstein” Press Outs (4-8 max @:20)
+1 x 50 Fast (R1&3 Free/R2&3 Back)        (3200/2750)
+"""
+
+
+def test_parse_reads_legs_in_brackets_and_strokes_per_round():
+    swims = plan.parse_plan(MONSTER_MASH)
+    warm = swims[0]                                   # 400, not 425
+    assert warm.yards == 400 and warm.legs == [(75, "freestyle"), (25, "backstroke")] * 4
+    assert {s.stroke for s in swims[1:13]} == {"drill"}   # a drill section's rounds
+    two, three = swims[13], swims[14]
+    assert two.legs == [(50, "backstroke"), (50, "freestyle")] * 2
+    assert (three.yards, three.legs) == (
+        300, [(75, "backstroke"), (150, "freestyle"), (75, "backstroke")])
+    # `2x or 1x thru` takes the first option; slash legs inside the brackets.
+    one_fifties = swims[15:19]
+    assert [s.legs for s in one_fifties] == [
+        [(50, "freestyle"), (50, "backstroke"), (50, "freestyle")]] * 4
+    # Press-outs are dryland; the sheet's `R2&3` typo still reads as alternation.
+    assert [(s.yards, s.stroke) for s in swims[19:]] == [
+        (50, "freestyle"), (50, "backstroke")] * 2
+
+
+def test_round_strokes_take_the_rounds_as_written_when_they_are_consistent():
+    assert plan._round_strokes("R1 Fly R2&3 Back", 3) == [
+        "butterfly", "backstroke", "backstroke"]
+    assert plan._round_strokes("1 x 50 Fast", 4) == []
