@@ -456,21 +456,21 @@ def _broken_day(extra: list[tuple[list[float], float]]) -> tuple[pd.DataFrame, l
                              rest_before_s=rest if pos == 0 else 0.0))
             idx += 1
         if rep <= len(whole):
-            matches.append(pt.PatternMatch(1, rep, 1, tuple(pt.IM_ORDER), 1, paces, idxs,
+            matches.append(patterns.PatternMatch(1, rep, 1, tuple(patterns.IM_ORDER), 1, paces, idxs,
                                            0.0, 0.0, 0.7, "workout"))
     return pd.DataFrame(rows), matches
 
 
 def test_a_100_im_broken_at_the_turn_is_read_from_the_days_own_medleys():
     df, whole = _broken_day([([27.2, 29.6], 40.0), ([36.0, 23.2], 6.4)])
-    got = pt.detect_broken(df, whole)
+    got = patterns.detect_broken(df, whole)
     assert [m.legs for m in got] == [("butterfly", "backstroke"),
                                      ("breaststroke", "freestyle")]
 
 
 def test_four_fast_25s_in_medley_order_are_read_as_one_medley():
     df, whole = _broken_day([([24.0], 60.0), ([30.4], 10.4), ([29.6], 37.6), ([22.4], 7.2)])
-    got = pt.detect_broken(df, whole)
+    got = patterns.detect_broken(df, whole)
     assert [m.legs for m in got] == [("butterfly",), ("backstroke",),
                                      ("breaststroke",), ("freestyle",)]
     assert not any(m.is_medley for m in got)      # each is a real 25 off the wall
@@ -478,14 +478,14 @@ def test_four_fast_25s_in_medley_order_are_read_as_one_medley():
 
 def test_free_50s_with_a_breather_are_not_a_broken_medley():
     df, whole = _broken_day([([23.2, 24.0], 40.0), ([23.2, 24.0], 6.4)])
-    assert pt.detect_broken(df, whole) == []
+    assert patterns.detect_broken(df, whole) == []
 
 
 def test_a_long_rest_is_two_swims_not_a_broken_medley():
     df, whole = _broken_day([([27.2, 29.6], 40.0), ([30.4, 23.2], 60.0)])
-    assert pt.detect_broken(df, whole) == []
+    assert patterns.detect_broken(df, whole) == []
 
 
 def test_one_whole_medley_is_too_little_to_measure_a_broken_one():
     df, whole = _broken_day([([27.2, 29.6], 40.0), ([36.0, 23.2], 6.4)])
-    assert pt.detect_broken(df, whole[:1]) == []
+    assert patterns.detect_broken(df, whole[:1]) == []
