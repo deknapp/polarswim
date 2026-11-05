@@ -119,7 +119,8 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     if params is None:
         params = stored or analyze.learn_params(df)
     df = analyze.classify(df, params)
-    df = analyze.label_im(df, analyze.detect_im(df))
+    im = analyze.detect_im(df)
+    df = analyze.label_im(df, im)
 
     # Order matters and is the whole contract. The fitted model may improve on the
     # rules; the swimmer's corrections outrank everything, including the model
@@ -130,21 +131,67 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     if model.is_usable():
         df = learn.apply(df, model)
 
-    # Medley windows, after the model and before the corrections, exactly as
-    # `analyze` orders them — the two functions have to agree or the card and the
-    # stored predictions describe different swims. The ratios are LOADED, not
-    # relearned: measuring them needs every medley in the history, and rendering
-    # one workout must not pay for a full-database pass.
-    from . import patterns as pat
-    ratios = pat.from_params(params)
-    parity = sendoff.read_parity(df, trains, ratios)
-    df = pat.label_patterns(df, sendoff.without_trains(
-        plan_.without_planned(pat.detect_patterns(df, ratios), readings), parity))
-    df = sendoff.label_parity(df, parity)
+    # Whole-rep readings, after the model and before the corrections, by the same
+    # code `analyze` runs. The ratios are LOADED, not relearned: measuring them
+    # needs every medley in the history, and rendering one workout must not pay for
+    # a full-database pass.
+    df, _ = analyze.read_structure(df, params, pat.from_params(params), readings,
+                                   trains, im)
 
     df = analyze.enforce_rep_consistency(df)
     df = plan_.apply_labels(df, plan_.labels(readings), plan_.shapes(readings))
-    return learn.apply_labels(df, db.load_labels(engine, workout_id))
+    df = learn.apply_labels(df, db.load_labels(engine, workout_id))
+    return correct_first_lengths(df)
+
+
+# Polar's clock appears to start before the swimmer leaves the wall. Across 1,836
+# freestyle reps of two or more lengths, the first length read a median 1.6 s
+# slower than the second, at every rest from 2 s to 90 s and every rep size but
+# 75s, where it was 0.8 s. A hand-timed 200 on 2026-09-28 read 10 s long on Polar,
+# its first length the slowest.
+#
+# Applied to freestyle only, because only freestyle measures it cleanly: the first
+# length of other strokes is usually one leg of a medley, compared against a
+# different stroke. Part of the 1.6 s may be real, a push from a dead stop against
+# a turn with momentum, so this is an estimate and nothing here has been checked
+# against a stopwatch.
+#
+# It happens HERE, after every stroke is decided, so the classifier and the scorer
+# keep seeing what Polar recorded. Everything that reports a time reads this frame.
+FIRST_LENGTH_ESTIMATE_S = 1.6
+
+
+def correct_first_lengths(df: pd.DataFrame) -> pd.DataFrame:
+    """Move the estimated early start from a free swim's first length into rest.
+
+    `first_length_estimated` marks the lengths changed. Polar's own record is kept
+    in `duration_observed_s`.
+    """
+    df = df.copy()
+    df["duration_observed_s"] = df["duration_s"]
+    df["first_length_estimated"] = False
+    if df.empty:
+        return df
+    s = df.sort_values(["workout_id", "idx"])
+    first = s["rep_id"].ne(s.groupby("workout_id")["rep_id"].shift(1))
+    gap = s["start_offset_s"] - (s["start_offset_s"] + s["duration_s"]).groupby(
+        s["workout_id"]).shift(1)
+    off_a_stop = gap.isna() | (gap > analyze.REST_GAP_S)
+    hidden = (s["rest_hidden"].fillna(False).astype(bool)
+              if "rest_hidden" in s.columns else pd.Series(False, index=s.index))
+    hit = s.index[first & off_a_stop & (s["predicted"] == "freestyle") & ~hidden
+                  & (s["duration_s"] > FIRST_LENGTH_ESTIMATE_S)]
+    if not len(hit):
+        return df
+    df.loc[hit, "duration_s"] -= FIRST_LENGTH_ESTIMATE_S
+    # pace_s is per real reference length, so a repaired record shares the shift.
+    factor = df.loc[hit, "length_factor"] if "length_factor" in df.columns else 1.0
+    df.loc[hit, "pace_s"] -= (FIRST_LENGTH_ESTIMATE_S
+                              * analyze.REFERENCE_LENGTH_M / df.loc[hit, "pool_m"] / factor)
+    if "rest_before_s" in df.columns:
+        df.loc[hit, "rest_before_s"] += FIRST_LENGTH_ESTIMATE_S
+    df.loc[hit, "first_length_estimated"] = True
+    return df
 
 
 # Accelerators written `Evens: 25 Fly, 25 Free, 25 Back / Odds: 25 Free, 25

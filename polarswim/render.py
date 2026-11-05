@@ -303,5 +303,8 @@ def strava_block(df: pd.DataFrame, header: dict,
     if "rest_hidden" in df.columns and df["rest_hidden"].fillna(False).astype(bool).any():
         parts += ["+rest = Polar missed the wall rest; time includes it, not ranked"]
 
+    if "first_length_estimated" in df.columns and df["first_length_estimated"].any():
+        parts += ["free: first length of each swim −1.6 s, estimated"]
+
     parts += ["", "— polarswim"]
     return "\n".join(parts)

@@ -239,6 +239,9 @@ def workout_svg(header: dict, sets: list[dict], mix: list[dict],
     notes = ("speed = percentile against your own reps at that distance and "
              "stroke; drill and unidentified sets are not ranked · "
              "pace / 50 = time normalised to 50 yd · ★ = personal best")
+    if df is not None and "first_length_estimated" in df.columns \
+            and df["first_length_estimated"].any():
+        notes += " · free: first length of each swim −1.6 s, estimated"
     o.append(f'<text x="{PAD}" y="{fy + 26}" fill="{DIM}" font-size="12">'
              f'{_esc(notes)}</text>')
     o.append(f'<text x="{PAD}" y="{fy + 44}" fill="{DIM}" font-size="12">'

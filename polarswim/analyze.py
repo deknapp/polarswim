@@ -975,6 +975,46 @@ def label_im(df: pd.DataFrame, rounds: list[IMRound]) -> pd.DataFrame:
     return df
 
 
+def read_structure(df: pd.DataFrame, params: dict, ratios: dict[str, float],
+                   readings: dict, trains: list, im: list,
+                   anchors: list[dict] | None = None) -> tuple[pd.DataFrame, list]:
+    """Write every whole-rep reading over the per-length guesses.
+
+    `analyze` and `report.classified_lengths` both call this, so the stored
+    predictions and the card cannot describe different swims.
+    """
+    from . import blocks as blk
+    from . import inserts as ins
+    from . import patterns as pat
+    from . import plan as plan_
+    from . import sendoff
+
+    # Freestyle with single-length stroke inserts is read before the medley
+    # matcher's guesses land, and wins over them: an unbroken 200 of
+    # `75 FR + 25 Fly + 75 FR + 25 BK` otherwise reads as a 200 IM in 50s.
+    found = ins.detect_inserts(df)
+    # ...and so is a swim of whole legs of free and one other stroke (`75 Back/
+    # 150 Free/75 Back`), which is too much of the other stroke to be inserts.
+    blocked = blk.detect_blocks(df, params, skip={(r.workout_id, r.rep_id) for r in found})
+    matches = blk.without_blocks(ins.without_inserts(plan_.without_planned(
+        pat.detect_patterns(df, ratios, anchors), readings), found), blocked)
+    # An odd/even reading of a send-off train outranks both: it reads the rep
+    # boundaries Polar missed, which the medley windows were matched across.
+    parity = sendoff.read_parity(df, trains, ratios)
+    matches = sendoff.without_trains(matches, parity)
+    # Only now is it known which reps nothing else read, and which whole medleys
+    # the day holds to measure a broken one against.
+    read = [*matches, *(pat.PatternMatch(r.workout_id, r.rep_id, 0, (), 1, [], r.idxs,
+                                         0.0, 0.0, 0.0, "")
+                        for r in [*found, *blocked])]
+    matches = matches + plan_.without_planned(pat.detect_broken(df, read, im), readings)
+    df = pat.label_patterns(df, matches)
+    df = ins.label_inserts(df, found)
+    df = blk.label_blocks(df, blocked)
+    df = sendoff.label_parity(df, parity)
+    return df, matches
+
+
 def analyze(engine: Engine, workout_id: int | None = None,
             persist: bool = True) -> AnalysisResult:
     """Run the full analysis and, by default, persist model and predictions."""
@@ -1077,31 +1117,8 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # whole rep, so where they disagree the structure is the better evidence — and
     # `learn.apply` would otherwise overwrite a recognised 150 back/breast/free
     # one length at a time.
-    # Freestyle with single-length stroke inserts is read before the medley
-    # matcher's guesses land, and wins over them: an unbroken 200 of
-    # `75 FR + 25 Fly + 75 FR + 25 BK` otherwise reads as a 200 IM in 50s.
-    from . import inserts as ins
-    found = ins.detect_inserts(df)
-    # ...and so is a swim of whole legs of free and one other stroke (`75 Back/
-    # 150 Free/75 Back`), which is too much of the other stroke to be inserts.
-    from . import blocks as blk
-    blocked = blk.detect_blocks(df, params, skip={(r.workout_id, r.rep_id) for r in found})
-    matches = blk.without_blocks(ins.without_inserts(plan_.without_planned(
-        pat.detect_patterns(df, ratios, pat.find_anchors(full)), readings), found), blocked)
-    # An odd/even reading of a send-off train outranks both: it reads the rep
-    # boundaries Polar missed, which the medley windows were matched across.
-    parity = sendoff.read_parity(df, trains, ratios)
-    matches = sendoff.without_trains(matches, parity)
-    # Only now is it known which reps nothing else read, and which whole medleys
-    # the day holds to measure a broken one against.
-    read = [*matches, *(pat.PatternMatch(r.workout_id, r.rep_id, 0, (), 1, [], r.idxs,
-                                         0.0, 0.0, 0.0, "")
-                        for r in [*found, *blocked])]
-    matches = matches + plan_.without_planned(pat.detect_broken(df, read, im), readings)
-    df = pat.label_patterns(df, matches)
-    df = ins.label_inserts(df, found)
-    df = blk.label_blocks(df, blocked)
-    df = sendoff.label_parity(df, parity)
+    df, matches = read_structure(df, params, ratios, readings, trains, im,
+                                 pat.find_anchors(full))
 
     # After every automatic step and before the swimmer's own word: a rep is one
     # stroke, but a correction may say otherwise and must still win.

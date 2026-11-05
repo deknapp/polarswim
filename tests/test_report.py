@@ -319,3 +319,40 @@ def test_a_warm_up_set_is_one_row_of_its_whole_distance():
         [(["freestyle"], None), (["kick", "kick"], None)], warmup=True))
     assert len(sets) == 1
     assert (sets[0]["reps"], sets[0]["rep_yards"], sets[0]["pattern"]) == (1, 75, "warm-up")
+
+
+def _swim(rows):
+    """rows: (rep_id, start, duration, stroke)"""
+    return pd.DataFrame([dict(workout_id=1, idx=i + 1, rep_id=r, start_offset_s=t,
+                              duration_s=d, pace_s=d, pool_m=22.86, length_factor=1.0,
+                              rest_before_s=0.0, predicted=st)
+                         for i, (r, t, d, st) in enumerate(rows)])
+
+
+def test_first_free_length_of_each_swim_gets_the_estimate():
+    out = report.correct_first_lengths(_swim([
+        (1, 0.0, 24.0, "freestyle"), (1, 24.0, 22.0, "freestyle"),
+        (2, 60.0, 24.0, "freestyle")]))
+    assert out["duration_s"].tolist() == pytest.approx([22.4, 22.0, 22.4])
+    assert out["pace_s"].tolist() == pytest.approx([22.4, 22.0, 22.4])
+    assert out["duration_observed_s"].tolist() == [24.0, 22.0, 24.0]
+    assert out["first_length_estimated"].tolist() == [True, False, True]
+
+
+def test_other_strokes_keep_polars_time():
+    out = report.correct_first_lengths(_swim([(1, 0.0, 27.0, "butterfly"),
+                                              (2, 60.0, 30.0, "backstroke")]))
+    assert out["duration_s"].tolist() == [27.0, 30.0]
+
+
+def test_a_rep_starting_with_no_rest_is_not_off_a_stop():
+    # A plan or send-off can start a rep where Polar logged no gap.
+    out = report.correct_first_lengths(_swim([(1, 0.0, 24.0, "freestyle"),
+                                              (2, 24.0, 24.0, "freestyle")]))
+    assert out["first_length_estimated"].tolist() == [True, False]
+
+
+def test_a_time_holding_a_hidden_rest_is_left_alone():
+    df = _swim([(1, 0.0, 40.0, "freestyle")])
+    df["rest_hidden"] = True
+    assert report.correct_first_lengths(df)["duration_s"].tolist() == [40.0]

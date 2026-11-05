@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 507 tests, no network
+.venv/bin/pytest -q                                # 511 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -172,6 +172,15 @@ spurious wall is only recognised as a split when its matching pair is found, and
 unmatched one survives as a single impossibly fast record — which showed up as a
 lifetime "best length" of 0:34 / 100 yd, 8.5 s for 25 yards. Polar reports these
 unfiltered; matching it is not worth quoting a time nobody swam.
+
+### The first length of a freestyle swim
+
+Polar's clock appears to start before the swimmer leaves the wall: across 1,836
+freestyle reps, the first length read a median 1.6 s slower than the second. Every
+reported time therefore takes 1.6 s off the first freestyle length after a stop and
+counts it as rest, and the card says so. It is an estimate, not checked against a
+stopwatch, and part of the gap may be real. Strokes are still read from Polar's own
+times, and the original is kept as `duration_observed_s`.
 
 ## Swimmer-calibrated metrics
 
