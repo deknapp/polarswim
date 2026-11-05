@@ -438,3 +438,54 @@ class TestUnevenMedley:
         found = [m for m in patterns.detect_patterns(
             w, {s: v / 22.0 for s, v in PROFILE.pace.items()}, []) if m.per_length]
         assert [m.idxs for m in found] == [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]
+
+
+# --- broken medleys ---------------------------------------------------------
+# The real 2026-11-04 times: four whole 100 IMs, a 100 IM broken at the turn, and
+# four fast 25s in medley order.
+def _broken_day(extra: list[tuple[list[float], float]]) -> tuple[pd.DataFrame, list]:
+    whole = [[27.2, 28.8, 30.4, 27.2], [26.4, 28.8, 29.6, 22.4],
+             [27.2, 28.8, 30.4, 23.2], [24.0, 29.6, 32.8, 24.8]]
+    rows, matches, idx = [], [], 1
+    rep = 0
+    for paces, rest in [(w, 40.0) for w in whole] + extra:
+        rep += 1
+        idxs = list(range(idx, idx + len(paces)))
+        for pos, p in enumerate(paces):
+            rows.append(dict(workout_id=1, idx=idx, rep_id=rep, set_id=1, pace_s=p,
+                             rest_before_s=rest if pos == 0 else 0.0))
+            idx += 1
+        if rep <= len(whole):
+            matches.append(pt.PatternMatch(1, rep, 1, tuple(pt.IM_ORDER), 1, paces, idxs,
+                                           0.0, 0.0, 0.7, "workout"))
+    return pd.DataFrame(rows), matches
+
+
+def test_a_100_im_broken_at_the_turn_is_read_from_the_days_own_medleys():
+    df, whole = _broken_day([([27.2, 29.6], 40.0), ([36.0, 23.2], 6.4)])
+    got = pt.detect_broken(df, whole)
+    assert [m.legs for m in got] == [("butterfly", "backstroke"),
+                                     ("breaststroke", "freestyle")]
+
+
+def test_four_fast_25s_in_medley_order_are_read_as_one_medley():
+    df, whole = _broken_day([([24.0], 60.0), ([30.4], 10.4), ([29.6], 37.6), ([22.4], 7.2)])
+    got = pt.detect_broken(df, whole)
+    assert [m.legs for m in got] == [("butterfly",), ("backstroke",),
+                                     ("breaststroke",), ("freestyle",)]
+    assert not any(m.is_medley for m in got)      # each is a real 25 off the wall
+
+
+def test_free_50s_with_a_breather_are_not_a_broken_medley():
+    df, whole = _broken_day([([23.2, 24.0], 40.0), ([23.2, 24.0], 6.4)])
+    assert pt.detect_broken(df, whole) == []
+
+
+def test_a_long_rest_is_two_swims_not_a_broken_medley():
+    df, whole = _broken_day([([27.2, 29.6], 40.0), ([30.4, 23.2], 60.0)])
+    assert pt.detect_broken(df, whole) == []
+
+
+def test_one_whole_medley_is_too_little_to_measure_a_broken_one():
+    df, whole = _broken_day([([27.2, 29.6], 40.0), ([36.0, 23.2], 6.4)])
+    assert pt.detect_broken(df, whole[:1]) == []

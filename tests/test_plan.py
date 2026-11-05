@@ -430,3 +430,13 @@ def test_round_strokes_take_the_rounds_as_written_when_they_are_consistent():
     assert plan._round_strokes("R1 Fly R2&3 Back", 3) == [
         "butterfly", "backstroke", "backstroke"]
     assert plan._round_strokes("1 x 50 Fast", 4) == []
+
+
+def test_a_fast_length_is_not_claimed_as_the_end_of_a_slow_drill():
+    # The real 2026-11-04 times: the 22.4 s free 25 is not part of the drill 100.
+    df = _lengths([[23.0] * 4, [23.0] * 4, [31.2], [40.0], [37.6], [34.4], [22.4],
+                   [24.0], [30.4], [29.6], [22.4]])
+    swims = plan.parse_plan("2 x 100 Free\n1 x 100 Drill\n1 x 25 Fly\n1 x 25 Back\n"
+                            "1 x 25 Breast\n1 x 25 Free\n")
+    segs = plan.align(df, swims)
+    assert [s.idxs for s in segs if s.swim_no == 2] == [[9, 10, 11, 12]]

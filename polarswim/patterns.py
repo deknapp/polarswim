@@ -938,6 +938,97 @@ def detect_patterns(df: pd.DataFrame,
     return out
 
 
+# --- broken medleys ---------------------------------------------------------
+# A 100 IM with a breather at the turn (2026-11-04, lengths 64-67: 27.2 29.6,
+# 6.4 s, 36.0 23.2), or four fast 25s in medley order, is two or four reps to the
+# watch, and each is too short to read alone: two lengths against six windows is
+# how a descending 50 free reads as back/fly, so `match_rep` rightly refuses it.
+# What makes it readable is that the same day holds whole 100 IMs, measuring this
+# swimmer's four legs that day. So the reference is never history, and a day
+# without two whole medleys never gets this reading.
+BROKEN_MIN_REFERENCE = 2       # whole 100 IMs the day must hold
+BROKEN_MAX_ERROR = 0.08        # mean |log ratio| against that day's legs
+BROKEN_RIVAL_MARGIN = 1.5      # "all one stroke" must fit this much worse
+BROKEN_MAX_REST_S = {2: 20.0, 4: 45.0}   # by reps: a breather; sprint-25 rest
+BROKEN_CONFIDENCE = 0.6
+
+
+def detect_broken(df: pd.DataFrame, matches: list[PatternMatch],
+                  rounds: list | None = None) -> list[PatternMatch]:
+    """100 IMs split across rests, on days that also swam whole ones.
+
+    Only reps nothing else has read are considered, and they must total exactly
+    four lengths as 2+2 or 1+1+1+1. Each piece is returned as its own match: a
+    leg of a broken medley is a genuine swim off the wall, so a single 25 keeps
+    its place in that stroke's rankings (see `label_patterns`).
+    """
+    out: list[PatternMatch] = []
+    if df.empty:
+        return out
+    taken = {(m.workout_id, i) for m in matches for i in m.idxs}
+    whole: dict[int, dict[tuple[int, ...], None]] = {}
+    for m in matches:
+        if m.is_medley and not m.reverse and len(m.idxs) == len(IM_ORDER):
+            whole.setdefault(m.workout_id, {})[tuple(m.idxs)] = None
+    for r in rounds or []:
+        if len(r.idxs) == len(IM_ORDER):
+            whole.setdefault(int(r.workout_id), {})[tuple(int(i) for i in r.idxs)] = None
+    taken |= {(w, i) for w, reps in whole.items() for rep in reps for i in rep}
+
+    block_no = max((m.block for m in matches), default=0)
+    for wid, reference in whole.items():
+        if len(reference) < BROKEN_MIN_REFERENCE:
+            continue
+        w = df[df["workout_id"] == wid].sort_values("idx")
+        pace = dict(zip(w["idx"].astype(int), w["pace_s"].astype(float)))
+        legs = np.median([[pace[i] for i in rep] for rep in reference
+                          if all(i in pace for i in rep)], axis=0)
+        reps = [g.sort_values("idx") for _, g in w.groupby("rep_id", sort=False)]
+        reps = [g for g in reps
+                if not any((wid, int(i)) in taken for i in g["idx"])]
+        pos = 0
+        while pos < len(reps):
+            found = None
+            for n in BROKEN_MAX_REST_S:
+                run = reps[pos:pos + n]
+                if len(run) == n and _broken_fits(run, legs, n):
+                    found = run
+                    break
+            if found is None:
+                pos += 1
+                continue
+            block_no += 1
+            at = 0
+            for g in found:
+                k = len(g)
+                out.append(PatternMatch(
+                    int(wid), int(g["rep_id"].iloc[0]), int(g["set_id"].iloc[0]),
+                    tuple(IM_ORDER[at:at + k]), 1,
+                    [float(x) for x in g["pace_s"]],
+                    [int(i) for i in g["idx"]], 0.0, 0.0,
+                    BROKEN_CONFIDENCE, "workout", block_no))
+                at += k
+            pos += len(found)
+    return out
+
+
+def _broken_fits(run: list[pd.DataFrame], legs: np.ndarray, n: int) -> bool:
+    """Whether these reps are one medley: contiguous, rested briefly, on its legs."""
+    if sum(len(g) for g in run) != len(IM_ORDER) or {len(g) for g in run} != {4 // n}:
+        return False
+    idx = np.concatenate([g["idx"].to_numpy() for g in run])
+    if (np.diff(idx) != 1).any():
+        return False
+    if any(float(g["rest_before_s"].iloc[0]) > BROKEN_MAX_REST_S[n] for g in run[1:]):
+        return False
+    p = np.concatenate([g["pace_s"].to_numpy(dtype=float) for g in run])
+    if not np.all(np.isfinite(p)) or (p <= 0).any():
+        return False
+    fit = float(np.abs(np.log(p / legs)).mean())
+    rival = float(np.abs(np.log(p / np.median(p))).mean())
+    return fit <= BROKEN_MAX_ERROR and rival >= BROKEN_RIVAL_MARGIN * fit
+
+
 # --- labelling --------------------------------------------------------------
 def label_patterns(df: pd.DataFrame, matches: list[PatternMatch]) -> pd.DataFrame:
     """Write a matched rep's known stroke order over whatever was inferred.

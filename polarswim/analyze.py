@@ -1092,6 +1092,12 @@ def analyze(engine: Engine, workout_id: int | None = None,
     # boundaries Polar missed, which the medley windows were matched across.
     parity = sendoff.read_parity(df, trains, ratios)
     matches = sendoff.without_trains(matches, parity)
+    # Only now is it known which reps nothing else read, and which whole medleys
+    # the day holds to measure a broken one against.
+    read = [*matches, *(pat.PatternMatch(r.workout_id, r.rep_id, 0, (), 1, [], r.idxs,
+                                         0.0, 0.0, 0.0, "")
+                        for r in [*found, *blocked])]
+    matches = matches + plan_.without_planned(pat.detect_broken(df, read, im), readings)
     df = pat.label_patterns(df, matches)
     df = ins.label_inserts(df, found)
     df = blk.label_blocks(df, blocked)

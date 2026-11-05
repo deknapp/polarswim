@@ -102,6 +102,8 @@ COST_BROKEN = 0.6                # a stop inside a swim (traffic, short wall)
 # 200 is never stretched across a two-minute rest.
 BROKEN_FREE_S = 20.0
 COST_BROKEN_PER_S = 0.08
+FAST_OUTLIER_RATIO = 0.75         # see `swim_cost`
+COST_FAST_OUTLIER = 3.0
 SLOW_SINGLE_Z = 2.0             # see `swim_cost`: a slow single 25 may hold rest
 COST_SENDOFF = 0.04              # per second outside the send-off tolerance
 SENDOFF_TOLERANCE_S = 8.0
@@ -739,6 +741,13 @@ def align(g: pd.DataFrame, swims: list[Swim],
             z = min(z, SLOW_SINGLE_Z)
         c += 0.5 * min(z * z, 16.0)
         c += leg_cost(s, i, k, want)
+        # One length far quicker than the rest of a one-stroke swim is a different
+        # swim: rest folded in explains a slow length, nothing explains a fast one.
+        # (11/4: a 22.4 s free 25 was claimed as the end of a 36 s/length drill 100.)
+        if k >= 3 and len(legs_of(s)) == 1:
+            low = float(dur[i:i + k].min() / np.median(dur[i:i + k]))
+            if low < FAST_OUTLIER_RATIO:
+                c += COST_FAST_OUTLIER
         pct = hr_pct(i, k) if (s.stroke == "butterfly" or s.easy) else None
         if pct is not None:
             if s.stroke == "butterfly":
