@@ -232,6 +232,14 @@ _PARITY_LINE = re.compile(r"^(odds?|evens?)\s*:\s*(.*)$", re.I)
 # Separators of a leg list: `50 FL/25 BK`, `50 Fly + 25 Back`, `25 Free, 25 Back`.
 _LEG_SEP = r"\s*[/+,]\s*"
 _IMO = re.compile(r"\bIMO\b|\bIM\s+order\b", re.I)
+# `Warm up 200 Swim 200 Kick`, `Cool Down - Ez 100`: the label is not part of the swim.
+_LEAD_LABEL = re.compile(r"^(?:warm\s*-?\s*up|cool\s*-?\s*down)\b\s*[-–—:]?\s*(?=\d|ez\b|easy\b)", re.I)
+_EASY_LAST = re.compile(r"^(ez|easy)\s+(\d{2,4})\s*$", re.I)
+# `Set 1 - Drills R:15s`: a heading, whatever follows it.
+_SET_HEADING = re.compile(r"^set\s*\d+\s*[-–—]\s*(.*)$", re.I)
+_EXAMPLE = re.compile(r"^(?:ex|e\.g)\b\.?\s*:", re.I)
+_LAST_25_IMO = re.compile(r"^last\s+25\b.*\bIM\s+order\b", re.I)
+_THRU_HEADING = re.compile(r"(\d+)\s*[x×]\s*(?:or\s+\d+\s*[x×]\s*)?thr(?:ough|u)\b\s*:?\s*$", re.I)
 
 
 _SHORT_NAME = {"butterfly": "fly", "backstroke": "back",
@@ -261,6 +269,34 @@ _ODD_EVEN_LEGS = re.compile(
     r"^\s*odds?\s+(\d{2,4})\s+(.+?)\s*/\s*evens?\s+(\d{2,4})\s+(.+?)\s*$", re.I)
 _EVERY_NTH = re.compile(
     r"\bevery\s+(\d+)(?:st|nd|rd|th)?\s+(\d{2,4})\s*(?:is\s+)?([A-Za-z]+)", re.I)
+
+
+_BARE_STROKE = re.compile(r"(?:fly|butterfly|back(?:stroke)?|breast(?:stroke)?|free(?:style)?)$", re.I)
+
+
+def _word_legs(desc: str, yards: int) -> list[tuple[int, str | None]]:
+    """`Fly Back Breast` on a 75: even legs, named by nothing but the strokes."""
+    words = desc.replace(",", " ").split()
+    if len(words) < 2 or not all(_BARE_STROKE.match(w) for w in words):
+        return []
+    strokes = [_stroke_of(w) for w in words]
+    if len(set(strokes)) != len(strokes) or yards % len(strokes):
+        return []
+    return [(yards // len(strokes), st) for st in strokes]
+
+
+def _inverted_imo(reps: list[Swim]) -> None:
+    """Fill `N x 125s + 75s` from `Last 25 of each 125 is Stroke in IM order`.
+
+    Each pair is one medley turned inside out: 100 free, the 25 the rotation has
+    reached, then a 75 of the three strokes after it, wrapping round.
+    """
+    for r in range(len(reps) // 2):
+        long_, short = reps[2 * r], reps[2 * r + 1]
+        at = r % len(IM_ORDER)
+        long_.legs = [(long_.yards - 25, "freestyle"), (25, IM_ORDER[at])]
+        short.legs = [(25, IM_ORDER[(at + n) % len(IM_ORDER)]) for n in (1, 2, 3)]
+        long_.stroke = short.stroke = None
 
 
 def _bracket_legs(inner: str, yards: int, outer: str = "") -> list[tuple[int, str | None]]:
@@ -419,7 +455,7 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
                if imo and order and reps >= len(order) else None)
         for i, (yards, desc) in enumerate(pieces):
             stroke = _stroke_of(desc, swim_is_free=not imo)
-            legs = _legs(desc, yards, swim_is_free=not imo)
+            legs = _legs(desc, yards, swim_is_free=not imo) or _word_legs(desc, yards)
             if legs:
                 legs = [(y, st if st is not None else rot) for y, st in legs]
                 strokes = {st for _, st in legs}
@@ -509,9 +545,22 @@ def parse_plan(text: str) -> list[Swim]:
         item = _ITEM.match(line)
         if item:
             line = item.group(1)
-        if not line or line.startswith("#") or _TOTAL.match(line):
+        if not line or line.startswith("#") or _TOTAL.match(line) or _EXAMPLE.match(line):
             continue
         line = _OPTIONS.sub(r"\1", line)
+        line = _LEAD_LABEL.sub("", line)
+        if ez := _EASY_LAST.match(line):
+            line = f"{ez.group(2)} {ez.group(1)}"
+        if _LAST_25_IMO.match(line):
+            if last_line and len(last_line) % 2 == 0:
+                _inverted_imo(last_line)
+            continue
+        if sh := _SET_HEADING.match(line):
+            section = sh.group(1)
+            close_block()
+            if th := _THRU_HEADING.search(line):
+                block, rounds, pending = [], int(th.group(1)), []
+            continue
         # `2: 50 Fly + 25 Back + 25 Br + 25 Fr` spells out the next two reps.
         cm = _COUNTED.match(line) if item else None
         if cm:
@@ -601,6 +650,10 @@ def parse_plan(text: str) -> list[Swim]:
             if block is not None and (_TOTAL.match(line) or line.endswith(":")):
                 close_block()
             continue
+        if drill:                             # `4 x 50 - Odd 25 - "Teacup"`
+            for sw in got:
+                if not sw.legs and re.search(r"\b(?:odd|even)\s+25\b", line, re.I):
+                    sw.stroke = "drill"
         pending = [s for s in got if s.stroke == "IM" and not s.legs]
         last_line, rounds_of = got, {}
         swims.extend(got)

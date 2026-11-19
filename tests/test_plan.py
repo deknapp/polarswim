@@ -471,3 +471,51 @@ def test_one_long_record_is_not_called_a_whole_swim_of_legs():
     g = _timed([(30.0, 30), (75.2, 20), (30.0, 20)])
     r = plan.read(g, plan.parse_plan("1 x 50 (25 Back + 25 Breast)"))
     assert not r.factor
+
+
+SHEET_11_18 = """\
+Workin' it Wednesday 11/18/2026
+Warm up 200 Swim 200 Kick 200 Pull (600)
+Set 1 - Drills R:15s (400/200)
+4/2 x 50 - Odd 25 - "Teacup" - Side Kick top elbow
+crooked on hip, bottom arm extended in front
+Even 25 - "Catch-Up"
+4/2 x 50 - Odd 25 - Free with Dolphin Kick
+Even 25 - Fly with Flutter Kick
+Set 2 - Inverted IMO's Mod Pace, R:15s (1600/800)
+8/4 x 125s + 75s
+Last 25 of each 125 is Stroke in IM order
+Then the 75 finishes the rest of the IM
+Ex: 100 finish with 25 fly, then 75 back breast free
+Then 100 finish with 25 back, then 75 breast free fly
+Set 3 - IM Pyramid, 1x or 2x thru: (500/1000)
+25 Fly
+50 Fly Back
+75 Fly Back Breast
+100 IM Up Tempo!
+Cool Down - Ez 100
+"""
+
+
+def test_the_inverted_imo_sheet_parses_as_written():
+    swims = plan.parse_plan(SHEET_11_18)
+    assert [(s.yards, s.stroke) for s in swims[:3]] == [
+        (200, "freestyle"), (200, "kick"), (200, "freestyle")]
+    assert [s.stroke for s in swims[3:11]] == ["drill"] * 8
+    first, then = swims[11], swims[12]
+    assert first.legs == [(100, "freestyle"), (25, "butterfly")]
+    assert then.legs == [(25, "backstroke"), (25, "breaststroke"), (25, "freestyle")]
+    assert swims[13].legs[1] == (25, "backstroke")
+    assert swims[14].legs == [(25, "breaststroke"), (25, "freestyle"), (25, "butterfly")]
+    assert len([s for s in swims if s.yards in (125, 75) and s.legs and s.line_no == first.line_no]) == 16
+
+
+def test_bare_stroke_lists_are_even_legs_in_the_order_written():
+    (s,) = plan.parse_plan("75 Back Breast Free")
+    assert s.legs == [(25, "backstroke"), (25, "breaststroke"), (25, "freestyle")]
+    (s,) = plan.parse_plan("100 Free with Dolphin Kick")
+    assert not s.legs
+
+
+def test_a_warm_up_heading_with_its_total_is_not_a_swim():
+    assert plan.parse_plan("Warm-Up (1000 yards)\n1 x 300 Free")[0].yards == 300
