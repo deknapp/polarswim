@@ -264,6 +264,31 @@ class TestLadders:
         im = [27.2, 32.8, 31.2, 22.0]
         assert self._detect([im, im, [22.0] * 3, [22.0] * 2]) == []
 
+    # 2026-11-18 as recorded. The opening 25 and 50 ran together both times.
+    PYRAMID = [[30.4, 29.6, 29.6], [27.2, 33.6, 30.4], [28.8, 32.0, 28.8, 28.8],
+               [28.8, 32.0, 31.2, 25.6], [28.8, 33.6, 28.0], [30.4, 31.2], [26.4]]
+    BACK_LED = [[34.4, 36.0, 28.8], [36.0, 29.6, 23.2], [36.0, 30.4, 25.6, 24.8],
+                [33.6, 29.6, 24.8, 27.2], [35.2, 27.2, 21.6], [35.2, 25.6], [35.2]]
+
+    def test_a_pyramid_may_have_two_peaks(self):
+        found = self._detect(self.PYRAMID)
+        assert [m.name for m in found] == [
+            "fly", "fly/back", "IM no free", "IM", "IM", "IM no free", "fly/back", "fly"]
+
+    def test_a_pyramid_may_start_its_medley_on_another_stroke(self):
+        found = self._detect(self.BACK_LED)
+        assert [m.name for m in found][2:5] == [
+            "IM no fly", "back/breast/free/fly", "back/breast/free/fly"]
+        assert found[0].legs == ("backstroke",)
+
+    def test_a_freestyle_pyramid_of_that_shape_is_not_a_medley(self):
+        free = [[24.8, 24.0, 24.4], [24.0, 24.8, 24.2], [24.4, 24.0, 24.8, 24.2],
+                [24.2, 24.6, 24.0, 24.4], [24.0, 24.4, 24.8], [24.2, 24.6], [24.4]]
+        assert self._detect(free) == []
+
+    def test_a_short_ladder_is_not_read_in_a_rotated_order(self):
+        assert self._detect([[36.0, 29.0], [36.0, 29.6, 23.2], [36.0, 30.4, 25.6, 24.8]]) == []
+
 
 class TestProfile:
     """Where the per-stroke reference times come from."""

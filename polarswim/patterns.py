@@ -672,6 +672,18 @@ LADDER_MIN_GAP = 1.10      # non-free lengths against free ones, median to media
 # Four per-stroke medians will always fit better than one, so the reading has to
 # beat "every length was one stroke" by more than that freedom buys on noise.
 LADDER_MARGIN = 1.5
+# 2026-11-18 swam the pyramid both ways: 25, 50, 75, 100, 100, 75, 50, 25, the
+# second time through led by back (back, breast, free, fly). So a pyramid can have
+# TWO peaks, which counts only with a three-leg rung outside each, since bare 100
+# IMs side by side are a 2x100. And its order can start anywhere in the medley;
+# that adds readings, so a rotated one needs most of a pyramid's shape behind it
+# and carries the same handicap as a reverse medley.
+LADDER_ROTATED_MIN_RUNGS = 6
+# A whole pyramid holds only two free lengths, one of them tired at the top, so the
+# gap to the other strokes reads small. Its shape has earned a lower bar; a free
+# pyramid of the same shape still sits within a few percent.
+LADDER_PYRAMID_MIN_GAP = 1.05
+LADDER_PYRAMID_MARGIN = 1.3
 # The 2026-09-13 ladder came down 75 back/breast/free, then 50 breast/free and
 # the last 25 free with no stop at the wall between them — 29.6, 22.4, 16.0, one
 # unbroken swim to the watch. So a rep may hold two neighbouring rungs back to
@@ -713,6 +725,13 @@ def _two_rungs(g: pd.DataFrame, L: int, k: int, step: int) -> list[_Rung] | None
     return None if any(r is None for r in pair) else pair
 
 
+def _shoulder(g: pd.DataFrame | None, L: int, step: int) -> bool:
+    """Whether a rep can be the three-leg rung beside a peak."""
+    n = len(IM_ORDER) - 1
+    return g is not None and (_rung(g, L, n) is not None
+                              or _two_rungs(g, L, n, step) is not None)
+
+
 def _find_ladders(w: pd.DataFrame) -> list[tuple[int, list[_Rung]]]:
     """Runs of consecutive reps that climb to a full medley and/or descend from one.
 
@@ -734,8 +753,13 @@ def _find_ladders(w: pd.DataFrame) -> list[tuple[int, list[_Rung]]]:
         if peak is None:
             continue
         rungs = [peak]
+        last = rid
+        second = _rung(reps[rid + 1], L, n) if rid + 1 in reps else None
+        if second is not None and _shoulder(reps.get(rid - 1), L, -1) \
+                and _shoulder(reps.get(rid + 2), L, 1):
+            rungs, last = [peak, second], rid + 1
         for step in (-1, 1):
-            k, r = n, rid
+            k, r = n, (rid if step < 0 else last)
             while k > 1 and r + step in reps and r + step not in used:
                 nxt_g = reps[r + step]
                 one = _rung(nxt_g, L, k - 1)
@@ -771,6 +795,10 @@ def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
                     front = climb_drops_front if i < top else descent_drops_front
                     wins.append(tuple(order[n - r.k:]) if front else tuple(order[:r.k]))
                 readings.setdefault(tuple(wins), reverse)
+    if len(rungs) >= LADDER_ROTATED_MIN_RUNGS:
+        for turn in range(1, n):
+            order = IM_ORDER[turn:] + IM_ORDER[:turn]
+            readings.setdefault(tuple(tuple(order[:r.k]) for r in rungs), True)
 
     def lengths(wins):
         for r, win in zip(rungs, wins):
@@ -793,10 +821,14 @@ def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
         scored.append((err * (REVERSE_PENALTY if reverse else 1.0), err, wins, med,
                        strokes, paces))
     scored.sort(key=lambda s: s[0])
-    _, err, wins, med, strokes, paces = scored[0]
-
-    if len(med) < n or min(med, key=med.get) != "freestyle":
+    # Freestyle is fastest on every day of the history, so a reading that says
+    # otherwise is out. Back-first and fly-first orders of one pyramid can fit
+    # identically; this is what chooses between them.
+    scored = [s for s in scored
+              if len(s[3]) == n and min(s[3], key=s[3].get) == "freestyle"]
+    if not scored:
         return []
+    _, err, wins, med, strokes, paces = scored[0]
 
     # A rep read as two rungs has a rival the readings above never score: the same
     # records as ONE medley window. 2026-06-01 closed a 2x100 IM with 75s of
@@ -811,7 +843,10 @@ def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
     for i, r in enumerate(rungs):
         if r.part:
             pairs.setdefault(r.rep_id, []).append(i)
-    for i, j in pairs.values():
+    # A pyramid complete down to the single 25 on BOTH sides has already said what
+    # its rungs are, so the rival is only for a ladder with a loose end.
+    whole_pyramid = rungs[0].k == 1 and rungs[-1].k == 1 and len(rungs) >= 2 * n - 1
+    for i, j in ({} if whole_pyramid else pairs).values():
         both = pd.concat([rungs[i].g, rungs[j].g])
         whole = windows(len(both) // L)
         if not whole:
@@ -828,13 +863,14 @@ def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
     overall = float(np.median(paces))
     null = float(np.mean(np.abs(paces - overall) / overall))
     margin = null / max(err, 1e-9)
-    if gap < LADDER_MIN_GAP or margin < LADDER_MARGIN:
+    if gap < (LADDER_PYRAMID_MIN_GAP if whole_pyramid else LADDER_MIN_GAP) \
+            or margin < (LADDER_PYRAMID_MARGIN if whole_pyramid else LADDER_MARGIN):
         return []
 
     # The shape names the strokes, so confidence rests on how clearly the pace
     # agrees: how far free stands off the rest, and how far clear of one stroke.
-    base = (0.72 + min(0.1, 0.5 * (gap - LADDER_MIN_GAP))
-            + min(0.06, 0.03 * (margin - LADDER_MARGIN)))
+    base = (0.72 + min(0.1, 0.5 * max(0.0, gap - LADDER_MIN_GAP))
+            + min(0.06, 0.03 * max(0.0, margin - LADDER_MARGIN)))
     out = []
     for r, win in zip(rungs, wins):
         real = r.g
