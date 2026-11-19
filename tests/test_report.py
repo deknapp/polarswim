@@ -330,29 +330,69 @@ def _swim(rows):
 
 
 def test_first_free_length_of_each_swim_gets_the_estimate():
-    out = report.correct_first_lengths(_swim([
+    out = report.correct_wall_time(_swim([
         (1, 0.0, 24.0, "freestyle"), (1, 24.0, 22.0, "freestyle"),
         (2, 60.0, 24.0, "freestyle")]))
     assert out["duration_s"].tolist() == pytest.approx([22.4, 22.0, 22.4])
     assert out["pace_s"].tolist() == pytest.approx([22.4, 22.0, 22.4])
     assert out["duration_observed_s"].tolist() == [24.0, 22.0, 24.0]
-    assert out["first_length_estimated"].tolist() == [True, False, True]
+    assert out["wall_time_estimated"].tolist() == [True, False, True]
 
 
 def test_other_strokes_keep_polars_time():
-    out = report.correct_first_lengths(_swim([(1, 0.0, 27.0, "butterfly"),
+    out = report.correct_wall_time(_swim([(1, 0.0, 27.0, "butterfly"),
                                               (2, 60.0, 30.0, "backstroke")]))
     assert out["duration_s"].tolist() == [27.0, 30.0]
 
 
 def test_a_rep_starting_with_no_rest_is_not_off_a_stop():
     # A plan or send-off can start a rep where Polar logged no gap.
-    out = report.correct_first_lengths(_swim([(1, 0.0, 24.0, "freestyle"),
+    out = report.correct_wall_time(_swim([(1, 0.0, 24.0, "freestyle"),
                                               (2, 24.0, 24.0, "freestyle")]))
-    assert out["first_length_estimated"].tolist() == [True, False]
+    assert out["wall_time_estimated"].tolist() == [True, False]
 
 
 def test_a_time_holding_a_hidden_rest_is_left_alone():
     df = _swim([(1, 0.0, 40.0, "freestyle")])
     df["rest_hidden"] = True
-    assert report.correct_first_lengths(df)["duration_s"].tolist() == [40.0]
+    assert report.correct_wall_time(df)["duration_s"].tolist() == [40.0]
+
+
+def _one_swim(times, stroke="freestyle", start=0.0, rep=1):
+    rows, t = [], start
+    for d in times:
+        rows.append((rep, t, d, stroke))
+        t += d
+    return rows
+
+
+def test_a_long_first_or_last_length_loses_most_of_its_excess():
+    df = _swim(_one_swim([28.0, 23.0, 23.0, 23.0, 28.0]) + _one_swim([23.0], start=200.0, rep=2))
+    out = report.correct_wall_time(df)
+    assert out["duration_s"].tolist()[:5] == pytest.approx([25.0, 23.0, 23.0, 23.0, 25.0])
+    assert out["duration_observed_s"].tolist()[0] == 28.0
+    assert out["pace_recorded_s"].tolist()[0] == 28.0
+    # Moved into rest: before the swim, and before whatever follows it.
+    assert out["rest_before_s"].tolist()[0] == pytest.approx(3.0)
+    assert out["rest_before_s"].tolist()[5] == pytest.approx(3.0 + 1.6)
+
+
+def test_a_first_length_near_the_usual_time_is_left_alone():
+    out = report.correct_wall_time(_swim(_one_swim([24.0, 23.0, 23.0, 23.0])))
+    assert out["duration_s"].tolist() == [24.0, 23.0, 23.0, 23.0]
+
+
+def test_a_detected_medley_length_is_not_compared_with_other_strokes():
+    rows = [(1, 0.0, 34.0, "backstroke"), (1, 34.0, 30.0, "breaststroke"),
+            (1, 64.0, 24.0, "freestyle"), (1, 88.0, 28.0, "butterfly")]
+    out = report.correct_wall_time(_swim(rows))
+    assert out["duration_s"].tolist() == [34.0, 30.0, 24.0, 28.0]
+
+
+def test_a_planned_stroke_is_compared_with_that_stroke_on_the_day():
+    rows = (_one_swim([24.0, 32.0, 32.0, 32.0, 24.0], "backstroke")
+            + [(2, 200.0, 25.0, "freestyle"), (2, 225.0, 36.0, "backstroke")])
+    df = _swim(rows)
+    df["label_source"] = "plan"
+    out = report.correct_wall_time(df)
+    assert out["duration_s"].iloc[-1] == pytest.approx(36.0 - 0.6 * 4.0)

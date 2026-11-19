@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -141,56 +142,117 @@ def classified_lengths(engine: Engine, workout_id: int | None = None,
     df = analyze.enforce_rep_consistency(df)
     df = plan_.apply_labels(df, plan_.labels(readings), plan_.shapes(readings))
     df = learn.apply_labels(df, db.load_labels(engine, workout_id))
-    return correct_first_lengths(df)
+    return correct_wall_time(df)
 
 
-# Polar's clock appears to start before the swimmer leaves the wall. Across 1,836
+# Polar's clock appears to run on while the swimmer is at the wall. Across 1,836
 # freestyle reps of two or more lengths, the first length read a median 1.6 s
-# slower than the second, at every rest from 2 s to 90 s and every rep size but
-# 75s, where it was 0.8 s. A hand-timed 200 on 2026-09-28 read 10 s long on Polar,
-# its first length the slowest.
+# slower than the second, and a hand-timed 200 on 2026-09-28 read 10 s long.
 #
-# Applied to freestyle only, because only freestyle measures it cleanly: the first
-# length of other strokes is usually one leg of a medley, compared against a
-# different stroke. Part of the 1.6 s may be real, a push from a dead stop against
-# a turn with momentum, so this is an estimate and nothing here has been checked
-# against a stopwatch.
+# How much depends on the length. Heart rate gives a check that does not use
+# Polar's walls: over about 450 stops and 700 starts on free swims, the heart-rate
+# peak moved 0.59 s earlier per extra second in the last length, and the low moved
+# 0.52-0.67 s later per extra second in the first. So roughly 60% of a long first
+# or last length looks like wall time, and that share is what is moved into rest.
 #
-# It happens HERE, after every stroke is decided, so the classifier and the scorer
-# keep seeing what Polar recorded. Everything that reports a time reads this frame.
+# "Long" needs something to be long against: the same stroke in the middle of the
+# same swim, or, where a plan or a correction names the stroke, that stroke's
+# mid-swim lengths that day. Detector-named medley lengths get neither, because a
+# slow one may simply be another stroke. Short free swims have no middle, so they
+# keep the flat estimate. Easing off or easing in looks the same to heart rate and
+# none of this has met a stopwatch, so these are estimates: they change times shown,
+# never strokes (this runs after every stroke is decided), and rankings keep
+# Polar's recorded times.
 FIRST_LENGTH_ESTIMATE_S = 1.6
+WALL_TIME_SHARE = 0.6
+WALL_MIN_EXCESS_S = 1.5          # Polar records in 0.8 s steps; less is noise
+WALL_MIN_IN_REP = 2              # mid-swim lengths of the stroke in the same swim
+WALL_MIN_IN_DAY = 3              # ...or that day, for a stroke the swimmer named
 
 
-def correct_first_lengths(df: pd.DataFrame) -> pd.DataFrame:
-    """Move the estimated early start from a free swim's first length into rest.
+def correct_wall_time(df: pd.DataFrame) -> pd.DataFrame:
+    """Move estimated wall time out of first and last lengths and into rest.
 
-    `first_length_estimated` marks the lengths changed. Polar's own record is kept
-    in `duration_observed_s`.
+    `wall_time_estimated` marks the lengths changed. Polar's own record stays in
+    `duration_observed_s` and `pace_recorded_s`, which is what rankings read.
     """
     df = df.copy()
     df["duration_observed_s"] = df["duration_s"]
-    df["first_length_estimated"] = False
+    df["pace_recorded_s"] = df["pace_s"]
+    df["wall_time_estimated"] = False
     if df.empty:
         return df
     s = df.sort_values(["workout_id", "idx"])
-    first = s["rep_id"].ne(s.groupby("workout_id")["rep_id"].shift(1))
-    gap = s["start_offset_s"] - (s["start_offset_s"] + s["duration_s"]).groupby(
-        s["workout_id"]).shift(1)
-    off_a_stop = gap.isna() | (gap > analyze.REST_GAP_S)
-    hidden = (s["rest_hidden"].fillna(False).astype(bool)
-              if "rest_hidden" in s.columns else pd.Series(False, index=s.index))
-    hit = s.index[first & off_a_stop & (s["predicted"] == "freestyle") & ~hidden
-                  & (s["duration_s"] > FIRST_LENGTH_ESTIMATE_S)]
-    if not len(hit):
+    for col, default in (("rest_hidden", False), ("length_factor", 1.0),
+                         ("label_source", "rules")):
+        if col not in s.columns:
+            s = s.assign(**{col: default})
+    cuts: dict = {}
+    rest_add: dict = {}
+    for _, g in s.groupby("workout_id", sort=False):
+        ix = g.index.to_numpy()
+        rep = g["rep_id"].to_numpy()
+        dur = g["duration_s"].to_numpy(dtype=float)
+        start = g["start_offset_s"].to_numpy(dtype=float)
+        stroke = g["predicted"].to_numpy(dtype=object)
+        factor = g["length_factor"].to_numpy(dtype=float)
+        hidden = g["rest_hidden"].fillna(False).to_numpy(dtype=bool)
+        named_by_him = g["label_source"].isin(["plan", "corrected"]).to_numpy()
+        gap = start[1:] - (start[:-1] + dur[:-1])
+        off_stop = np.r_[True, gap > analyze.REST_GAP_S]
+        to_stop = np.r_[gap > analyze.REST_GAP_S, True]
+        first = np.r_[True, rep[1:] != rep[:-1]]
+        last = np.r_[rep[1:] != rep[:-1], True]
+        clean = ~hidden & np.isclose(factor, 1.0) & np.isin(
+            stroke.astype(str), analyze.NAMED_STROKES)
+        inner = clean & ~first & ~last
+        in_rep: dict = {}
+        in_day: dict = {}
+        for i in np.flatnonzero(inner):
+            in_rep.setdefault((rep[i], stroke[i]), []).append(dur[i])
+            if named_by_him[i]:
+                in_day.setdefault(stroke[i], []).append(dur[i])
+
+        def usual(i: int) -> float | None:
+            same = in_rep.get((rep[i], stroke[i]), [])
+            if len(same) >= WALL_MIN_IN_REP:
+                return float(np.median(same))
+            day = in_day.get(stroke[i], [])
+            if named_by_him[i] and len(day) >= WALL_MIN_IN_DAY:
+                return float(np.median(day))
+            return None
+
+        for i in range(len(g)):
+            at_start = first[i] and off_stop[i]
+            at_end = last[i] and to_stop[i]
+            if hidden[i] or not (at_start or at_end):
+                continue
+            base = usual(i) if clean[i] else None
+            if base is not None:
+                excess = dur[i] - base
+                if excess < WALL_MIN_EXCESS_S:
+                    continue
+                cut = WALL_TIME_SHARE * excess
+            elif at_start and stroke[i] == "freestyle" and dur[i] > FIRST_LENGTH_ESTIMATE_S:
+                cut = FIRST_LENGTH_ESTIMATE_S
+            else:
+                continue
+            cuts[ix[i]] = cut
+            target = ix[i] if at_start else (ix[i + 1] if i + 1 < len(g) else None)
+            if target is not None:
+                rest_add[target] = rest_add.get(target, 0.0) + cut
+    if not cuts:
         return df
-    df.loc[hit, "duration_s"] -= FIRST_LENGTH_ESTIMATE_S
-    # pace_s is per real reference length, so a repaired record shares the shift.
+    hit = pd.Index(list(cuts))
+    cut = pd.Series(cuts, dtype=float)
+    df.loc[hit, "duration_s"] -= cut
     factor = df.loc[hit, "length_factor"] if "length_factor" in df.columns else 1.0
-    df.loc[hit, "pace_s"] -= (FIRST_LENGTH_ESTIMATE_S
-                              * analyze.REFERENCE_LENGTH_M / df.loc[hit, "pool_m"] / factor)
-    if "rest_before_s" in df.columns:
-        df.loc[hit, "rest_before_s"] += FIRST_LENGTH_ESTIMATE_S
-    df.loc[hit, "first_length_estimated"] = True
+    # pace_s is per real reference length, so a repaired record shares the shift.
+    df.loc[hit, "pace_s"] -= cut * analyze.REFERENCE_LENGTH_M / df.loc[hit, "pool_m"] / factor
+    if "rest_before_s" in df.columns and rest_add:
+        add = pd.Series(rest_add, dtype=float)
+        df.loc[add.index, "rest_before_s"] += add
+    df.loc[hit, "wall_time_estimated"] = True
     return df
 
 
@@ -373,7 +435,13 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 row.update(stroke="other", pattern="warm-up", confidence=1.0)
             if ref is not None:
                 row["hr_zone"] = ref.hr_zone(_absolute_hr(sub))
-                fastest = float(sub_reps["duration_s"].sum().min())
+                # Ranked on what Polar recorded: an estimate of wall time must
+                # not be able to hand out a personal best.
+                recorded = ("duration_observed_s" if "duration_observed_s" in sub.columns
+                            else "duration_s")
+                fastest = float(sub_reps[recorded].sum().min())
+                rank_seconds = rep_seconds + float(
+                    (sub[recorded] - sub["duration_s"]).sum()) / max(n_reps, 1)
                 # Drill, kick and unidentified lengths get no speed percentile.
                 # They were ranked against other drill and kick, which reads as a
                 # speed score and is not one: a 68 s "50" of kick came back at the
@@ -392,9 +460,9 @@ def sets_for_workout(df: pd.DataFrame, repairs: set[tuple[int, int]] | None = No
                 elif row["stroke"] in analyze.UNNAMED_STROKES or partial:
                     row["speed"] = None
                 elif row["stroke"] == "IM":
-                    row["speed"] = ref.im_percentile(rep_yards, rep_seconds)
+                    row["speed"] = ref.im_percentile(rep_yards, rank_seconds)
                 else:
-                    row["speed"] = ref.speed_percentile(rep_yards, rep_seconds,
+                    row["speed"] = ref.speed_percentile(rep_yards, rank_seconds,
                                                         row["stroke"])
                 row["pr"] = (False if partial or row["rest_hidden"] or warmup else
                              ref.check_pr(rep_yards, row["stroke"], fastest,
@@ -532,8 +600,8 @@ def _best_length_pace(named: pd.DataFrame, median_pace_s: float) -> float | None
     """
     from .metrics import PLAUSIBLE_FLOOR_RATIO
 
-    plausible = named["pace_s"][
-        named["pace_s"] >= median_pace_s * PLAUSIBLE_FLOOR_RATIO]
+    pace = named["pace_recorded_s"] if "pace_recorded_s" in named.columns else named["pace_s"]
+    plausible = pace[pace >= median_pace_s * PLAUSIBLE_FLOOR_RATIO]
     if plausible.empty:
         return None
     return round(float(plausible.min()) * PACE_YARDS / 25.0, 1)

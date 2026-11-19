@@ -327,6 +327,11 @@ def build_reference(engine: Engine, lengths_df: pd.DataFrame) -> SwimmerReferenc
     if lengths_df is None or lengths_df.empty:
         return ref
 
+    # Rankings run on Polar's recorded times, never on estimated wall time.
+    if "duration_observed_s" in lengths_df.columns:
+        lengths_df = lengths_df.assign(duration_s=lengths_df["duration_observed_s"],
+                                       pace_s=lengths_df["pace_recorded_s"])
+
     # A length that absorbed an unseen rest (see `plan.PlanReading.rest_hidden`)
     # has no pace in it; ranking it would file a rest as a slow swim, and a rep
     # holding one would compete for bests on a time nobody swam.

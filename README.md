@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 521 tests, no network
+.venv/bin/pytest -q                                # 525 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -173,14 +173,18 @@ unmatched one survives as a single impossibly fast record — which showed up as
 lifetime "best length" of 0:34 / 100 yd, 8.5 s for 25 yards. Polar reports these
 unfiltered; matching it is not worth quoting a time nobody swam.
 
-### The first length of a freestyle swim
+### Wall time in first and last lengths
 
-Polar's clock appears to start before the swimmer leaves the wall: across 1,836
-freestyle reps, the first length read a median 1.6 s slower than the second. Every
-reported time therefore takes 1.6 s off the first freestyle length after a stop and
-counts it as rest, and the card says so. It is an estimate, not checked against a
-stopwatch, and part of the gap may be real. Strokes are still read from Polar's own
-times, and the original is kept as `duration_observed_s`.
+Polar's clock appears to keep running while the swimmer is at the wall. Heart rate
+gives an independent check: on free swims, the peak after a stop comes earlier, and
+the low after a start comes later, by about 0.6 s per extra second in a long last or
+first length. So reported times move 60% of that extra time into rest, measured
+against the same stroke mid-swim, or that day's mid-swim lengths when a plan or
+correction names the stroke. Differences under 1.5 s are left alone, detector-named
+medley lengths are not compared across strokes, and short free swims keep a flat
+1.6 s. These are estimates, not checked against a stopwatch. Strokes are still read
+from Polar's own times, personal bests and speed percentiles use the recorded times,
+and the originals stay in `duration_observed_s`.
 
 ## Swimmer-calibrated metrics
 
