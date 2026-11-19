@@ -128,6 +128,17 @@ RESPLIT_RATIO = 1.25
 # freestyle, since a 50 has no "other lengths" to compare with.
 HIDDEN_LONG_RATIO = 1.45
 HIDDEN_SHORT_RATIO = 0.85
+# A swim of several strokes can come back from Polar with lengths missing that
+# were plainly swum. 11/18, a 200 of 100 free + four stroke 25s with a short break
+# in it: four free lengths, one 62.4 s record, a 26.4 s "rest", one more length.
+# All four reps took the same 208-225 s, so the record is two lengths and the
+# "rest" is a length Polar never logged. Multiples of the swim's own length time.
+MERGED_RECORD_RATIO = 1.7
+LOST_GAP_RATIOS = (0.75, 1.35)
+COST_RECOVERED = 0.5             # per length recovered: allowed, not free
+# Only where most of the swim survived. One long record called a whole 50 is a
+# swim plus its rest (10/23's 75.2 s), and nothing around it says otherwise.
+RECOVER_MIN_LENGTHS = 4
 
 
 # --- parsing ----------------------------------------------------------------
@@ -640,6 +651,19 @@ def _expected_ratio(swim: Swim, ratios: dict[str, float]) -> tuple[float, float]
     return base, PACE_SIGMA.get(swim.stroke, DEFAULT_SIGMA)
 
 
+def _recovered(dur: np.ndarray, gaps: np.ndarray, one: float) -> tuple[np.ndarray, np.ndarray]:
+    """How many lengths each record covers, and which inner gaps hid one.
+
+    `gaps[t]` is the rest before record `t`; the first is ignored, since a swim's
+    opening rest is not inside it. `one` is the swim's expected time per length.
+    """
+    covers = np.array([int(round(x / one)) if x >= MERGED_RECORD_RATIO * one else 1
+                       for x in dur])
+    lost = np.zeros(len(dur), dtype=bool)
+    lost[1:] = (gaps[1:] >= LOST_GAP_RATIOS[0] * one) & (gaps[1:] <= LOST_GAP_RATIOS[1] * one)
+    return covers, lost
+
+
 def _hr_means(start: np.ndarray, end: np.ndarray, hr: np.ndarray | None) -> np.ndarray:
     """Mean heart rate over each length, shifted by the cardiac lag."""
     out = np.full(len(start), np.nan)
@@ -727,12 +751,20 @@ def align(g: pd.DataFrame, swims: list[Swim],
         cover = int(sum(max(1, round(x / one)) for x in dur[i:i + k]))
         cover = min(max(cover, k), want) if k < want else k
         c = COST_COUNT * abs(k - want)
+        swum = csum[i + k] - csum[i]
+        if want >= RECOVER_MIN_LENGTHS and k < want and len({st for _, st in legs_of(s)}) > 1:
+            covers, lost = _recovered(dur[i:i + k], gap_before[i:i + k], one)
+            found = int(covers.sum()) + int(lost.sum())
+            if k < found <= want:
+                c = COST_COUNT * (want - found) + COST_RECOVERED * (found - k)
+                cover = found
+                swum += float(gap_before[i:i + k][lost].sum())
         # stops strictly inside the claimed run, dearer the longer they were
         for t in range(i + 1, i + k):
             if rest_start[t]:
                 c += COST_BROKEN + COST_BROKEN_PER_S * max(0.0, gap_before[t] - BROKEN_FREE_S)
         # pace per planned length, so a missed wall does not read as slow swimming
-        pace = (csum[i + k] - csum[i]) / cover * norm
+        pace = swum / cover * norm
         z = math.log(pace / (free_ref * exp)) / sigma
         # A single length that ran slow may hold a rest Polar folded in (a 56 s
         # back-drill 25 on 10/30): slow there costs little more than two sigma.
@@ -942,6 +974,22 @@ def read(g: pd.DataFrame, swims: list[Swim],
         else:
             pos = (np.cumsum(d) - d / 2) / d.sum() * s.yards
         bounds = np.cumsum([y for y, _ in legs])
+        # Lengths Polar fused or dropped inside a swim of legs: the clock, gaps
+        # included, says where each surviving record sits among the legs.
+        if RECOVER_MIN_LENGTHS <= want and len(d) < want and not one_stroke:
+            at = g.loc[seg.idxs, "start_offset_s"].to_numpy(dtype=float)
+            gaps = np.r_[0.0, at[1:] - (at[:-1] + d[:-1])]
+            one = free_ref * _expected_ratio(s, ratios or {})[0]
+            covers, lost = _recovered(d, gaps, one)
+            if covers.sum() + lost.sum() == want:
+                span = at[-1] + d[-1] - at[0]
+                pos = (at + d / 2 - at[0]) / span * s.yards
+                yards.update({i: s.yards for i in seg.idxs})
+                for i, n in zip(seg.idxs, covers):
+                    if n > 1:
+                        factor[i] = float(n)
+                        kind[i] = "merged"
+                        hidden.add(i)
         # More lengths than the plan holds: the swimmer says 50, Polar logged
         # three lengths and 97.6 s for an all-out 50 fly (10/22). Something else
         # ran on into it, so its time is not the swim's and must not rank —
@@ -1138,7 +1186,9 @@ def describe(g: pd.DataFrame, swims: list[Swim], reading: PlanReading) -> str:
             want = max(1, int(round(s.yards / pool_yd)))
             if len(seg.idxs) != want:
                 name += f"  [Polar: {len(seg.idxs)} lengths]"
-        fixed = " re-split" if any(i in reading.factor for i in seg.idxs) else ""
+        fixed = "".join(sorted({" re-split" if reading.kind.get(i) == "resplit"
+                                else " missed wall" for i in seg.idxs
+                                if i in reading.factor}))
         lines.append(f"{span} {name:<34} {t.sum():6.1f}s  "
                      + " ".join(f"{x:.1f}" for x in t) + fixed)
     return "\n".join(lines)

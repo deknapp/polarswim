@@ -440,3 +440,34 @@ def test_a_fast_length_is_not_claimed_as_the_end_of_a_slow_drill():
                             "1 x 25 Breast\n1 x 25 Free\n")
     segs = plan.align(df, swims)
     assert [s.idxs for s in segs if s.swim_no == 2] == [[9, 10, 11, 12]]
+
+
+def _timed(rows):
+    """rows: (duration, rest before) per record."""
+    out, t = [], 5.0
+    for i, (d, rest) in enumerate(rows, start=1):
+        t += rest
+        out.append({"workout_id": 1, "idx": i, "start_offset_s": t, "duration_s": d,
+                    "pool_m": POOL_M, "rest_before_s": rest, "set_id": 1})
+        t += d
+    return pd.DataFrame(out)
+
+
+def test_a_fused_record_and_a_lost_length_stay_inside_their_swim():
+    # 11/18: four free, one record of two lengths, a "rest" that was a length, one more.
+    g = _timed([(26.4, 30), (22.4, 0), (23.2, 0), (24.8, 0), (62.4, 0), (32.0, 26.4),
+                (28.8, 17), (22.4, 0), (23.2, 0), (26.4, 0), (24.0, 0), (30.0, 0),
+                (29.0, 0), (25.0, 0)])
+    swims = plan.parse_plan("1 x 200 (100 Free + 25 Back + 25 Breast + 25 Free + 25 Fly)\n"
+                            "1 x 200 (100 Free + 25 Fly + 25 Back + 25 Breast + 25 Free)")
+    r = plan.read(g, swims)
+    assert [s.idxs for s in r.segments] == [[1, 2, 3, 4, 5, 6], list(range(7, 15))]
+    assert r.stroke[5] == "backstroke" and r.stroke[6] == "butterfly"
+    assert r.factor[5] == 2.0 and r.kind[5] == "merged" and 5 in r.rest_hidden
+    assert r.yards[1] == 200
+
+
+def test_one_long_record_is_not_called_a_whole_swim_of_legs():
+    g = _timed([(30.0, 30), (75.2, 20), (30.0, 20)])
+    r = plan.read(g, plan.parse_plan("1 x 50 (25 Back + 25 Breast)"))
+    assert not r.factor
