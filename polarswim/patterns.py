@@ -684,6 +684,9 @@ LADDER_ROTATED_MIN_RUNGS = 6
 # pyramid of the same shape still sits within a few percent.
 LADDER_PYRAMID_MIN_GAP = 1.05
 LADDER_PYRAMID_MARGIN = 1.3
+# ...but only against the DAY's freestyle too. 2026-07-06 swam a pyramid of free
+# 50s at 21-26 s, whose fastest lengths alone clear the two bars above.
+LADDER_PYRAMID_MIN_DAY_RATIO = 1.15
 # The 2026-09-13 ladder came down 75 back/breast/free, then 50 breast/free and
 # the last 25 free with no stop at the wall between them — 29.6, 22.4, 16.0, one
 # unbroken swim to the watch. So a rep may hold two neighbouring rungs back to
@@ -774,7 +777,8 @@ def _find_ladders(w: pd.DataFrame) -> list[tuple[int, list[_Rung]]]:
     return out
 
 
-def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
+def _read_ladder(L: int, rungs: list[_Rung],
+                 day_free_s: float = float("nan")) -> list[PatternMatch]:
     """Name every length of a ladder by its shape, or decline.
 
     Every reading the shape allows is scored the same way — each stroke's lengths
@@ -856,15 +860,17 @@ def _read_ladder(L: int, rungs: list[_Rung]) -> list[PatternMatch]:
         single = min(fit(p, [s for s in legs for _ in range(L)]) for legs, _ in whole)
         if single <= fit(p, split):
             keep = rungs[:i] if i > top else rungs[j + 1:]
-            return _read_ladder(L, keep) if len(keep) >= LADDER_MIN_REPS else []
+            return _read_ladder(L, keep, day_free_s) if len(keep) >= LADDER_MIN_REPS else []
     free = paces[strokes == "freestyle"]
     other = paces[strokes != "freestyle"]
     gap = float(np.median(other)) / float(np.median(free))
     overall = float(np.median(paces))
     null = float(np.mean(np.abs(paces - overall) / overall))
     margin = null / max(err, 1e-9)
-    if gap < (LADDER_PYRAMID_MIN_GAP if whole_pyramid else LADDER_MIN_GAP) \
-            or margin < (LADDER_PYRAMID_MARGIN if whole_pyramid else LADDER_MARGIN):
+    easier = (whole_pyramid and np.isfinite(day_free_s)
+              and float(np.median(other)) >= LADDER_PYRAMID_MIN_DAY_RATIO * day_free_s)
+    if gap < (LADDER_PYRAMID_MIN_GAP if easier else LADDER_MIN_GAP) \
+            or margin < (LADDER_PYRAMID_MARGIN if easier else LADDER_MARGIN):
         return []
 
     # The shape names the strokes, so confidence rests on how clearly the pace
@@ -921,7 +927,7 @@ def detect_patterns(df: pd.DataFrame,
         # is exactly the day they are for.
         claimed: set[int] = set()
         for L, rungs in _find_ladders(w):
-            found = _read_ladder(L, rungs)
+            found = _read_ladder(L, rungs, float(np.percentile(w["pace_s"], 15)))
             if not found:
                 continue
             block_no += 1

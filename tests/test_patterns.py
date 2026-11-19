@@ -271,7 +271,8 @@ class TestLadders:
                 [33.6, 29.6, 24.8, 27.2], [35.2, 27.2, 21.6], [35.2, 25.6], [35.2]]
 
     def test_a_pyramid_may_have_two_peaks(self):
-        found = self._detect(self.PYRAMID)
+        # The day's freestyle, swum first, is what the strokes are slow against.
+        found = self._detect([[23.0] * 6] * 4 + self.PYRAMID)
         assert [m.name for m in found] == [
             "fly", "fly/back", "IM no free", "IM", "IM", "IM no free", "fly/back", "fly"]
 
@@ -285,6 +286,14 @@ class TestLadders:
         free = [[24.8, 24.0, 24.4], [24.0, 24.8, 24.2], [24.4, 24.0, 24.8, 24.2],
                 [24.2, 24.6, 24.0, 24.4], [24.0, 24.4, 24.8], [24.2, 24.6], [24.4]]
         assert self._detect(free) == []
+
+    def test_a_quick_pyramid_with_nothing_slower_around_it_is_not_a_medley(self):
+        """2026-07-06: free 50s at 21-26 s, the same shape, fastest lengths apart."""
+        quick = [[24.8, 24.8, 22.4, 22.4, 21.6, 24.0], [24.0, 22.4, 23.2, 24.8, 26.4, 25.6],
+                 [24.8, 21.6, 22.4, 25.6, 23.2, 24.0, 23.2, 24.8],
+                 [22.4, 20.8, 22.4, 23.2, 23.2, 24.8, 24.0, 22.4],
+                 [22.4, 20.8, 22.4, 25.6, 23.2, 24.0], [22.4, 20.8, 22.4, 25.6], [24.0, 23.2]]
+        assert self._detect(quick) == []
 
     def test_a_short_ladder_is_not_read_in_a_rotated_order(self):
         assert self._detect([[36.0, 29.0], [36.0, 29.6, 23.2], [36.0, 30.4, 25.6, 24.8]]) == []
