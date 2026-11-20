@@ -182,9 +182,10 @@ def correct_wall_time(df: pd.DataFrame) -> pd.DataFrame:
     df["wall_time_estimated"] = False
     if df.empty:
         return df
+    df = _apply_plan_times(df)
     s = df.sort_values(["workout_id", "idx"])
     for col, default in (("rest_hidden", False), ("length_factor", 1.0),
-                         ("label_source", "rules")):
+                         ("label_source", "rules"), ("plan_timed", False)):
         if col not in s.columns:
             s = s.assign(**{col: default})
     cuts: dict = {}
@@ -196,7 +197,8 @@ def correct_wall_time(df: pd.DataFrame) -> pd.DataFrame:
         start = g["start_offset_s"].to_numpy(dtype=float)
         stroke = g["predicted"].to_numpy(dtype=object)
         factor = g["length_factor"].to_numpy(dtype=float)
-        hidden = g["rest_hidden"].fillna(False).to_numpy(dtype=bool)
+        hidden = (g["rest_hidden"].fillna(False).to_numpy(dtype=bool)
+                  | g["plan_timed"].fillna(False).to_numpy(dtype=bool))
         named_by_him = g["label_source"].isin(["plan", "corrected"]).to_numpy()
         gap = start[1:] - (start[:-1] + dur[:-1])
         off_stop = np.r_[True, gap > analyze.REST_GAP_S]
@@ -253,6 +255,61 @@ def correct_wall_time(df: pd.DataFrame) -> pd.DataFrame:
         add = pd.Series(rest_add, dtype=float)
         df.loc[add.index, "rest_before_s"] += add
     df.loc[hit, "wall_time_estimated"] = True
+    return df
+
+
+def _shift(df: pd.DataFrame, i, secs: float, at_start: bool | None) -> None:
+    """Take `secs` out of record `i` and put it in the rest before or after it
+    (`at_start`), or nowhere (None: the caller moves it)."""
+    if secs <= 0:
+        return
+    df.loc[i, "duration_s"] -= secs
+    factor = float(df.loc[i, "length_factor"]) if "length_factor" in df.columns else 1.0
+    df.loc[i, "pace_s"] -= secs * analyze.REFERENCE_LENGTH_M / float(df.loc[i, "pool_m"]) / factor
+    if at_start is None:
+        return
+    if at_start:
+        df.loc[i, "start_offset_s"] += secs
+        if "rest_before_s" in df.columns:
+            df.loc[i, "rest_before_s"] += secs
+    else:
+        nxt = df.index[(df["workout_id"] == df.loc[i, "workout_id"])
+                       & (df["idx"] == df.loc[i, "idx"] + 1)]
+        if len(nxt) and "rest_before_s" in df.columns:
+            df.loc[nxt[0], "rest_before_s"] += secs
+
+
+def _apply_plan_times(df: pd.DataFrame) -> pd.DataFrame:
+    """What the plan says about time, before anything is estimated.
+
+    A break Polar folded between two planned swims was measured in `plan.read`
+    and goes back into rest whole. A swim the swimmer timed himself is scaled to
+    his time, every length alike: where Polar's walls landed is exactly what is
+    in doubt, so no one length is singled out. Both mark their lengths so the
+    wall-time estimate leaves them alone.
+    """
+    df["plan_timed"] = False
+    if "rest_folded_s" in df.columns:
+        for i in df.index[df["rest_folded_s"].fillna(0) > 0]:
+            _shift(df, i, float(df.loc[i, "rest_folded_s"]), bool(df.loc[i, "folded_at_start"]))
+            df.loc[i, "plan_timed"] = True
+            df.loc[i, "wall_time_estimated"] = True
+    if "hand_time_s" in df.columns and df["hand_time_s"].notna().any():
+        timed = df[df["hand_time_s"].notna()]
+        for _, g in timed.groupby(["workout_id", "rep_id"]):
+            g = g.sort_values("idx")
+            total = float(g["duration_s"].sum())
+            want = float(g["hand_time_s"].iloc[0])
+            if not 0 < want < total:
+                continue
+            scale = want / total
+            # Every length gives up its share; the rest after the swim gets it all.
+            for i in g.index[:-1]:
+                _shift(df, i, float(df.loc[i, "duration_s"]) * (1 - scale), None)
+            _shift(df, g.index[-1], total - want - float(
+                (g["duration_s"].iloc[:-1] * (1 - scale)).sum()), False)
+            df.loc[g.index, "plan_timed"] = True
+            df.loc[g.index, "wall_time_estimated"] = True
     return df
 
 

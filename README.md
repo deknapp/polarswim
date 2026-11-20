@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 531 tests, no network
+.venv/bin/pytest -q                                # 536 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -434,7 +434,10 @@ The reader takes a coach's layout as written: `8x50s Drill IMO` (the reps
 rotate fly, back, breast, free), `1x600: 200 Swim/200 Kick/200 Choice`,
 `4x50s 25's Swim/25's Drill IMO`, a `3x125 IM` with one `50 FL/25 BK/25 BR/25 FR`
 line under it per rep (a floating IM), `2x thru` over a block, and send-offs
-written `@1:10`, `on 2:00/2:15`, or as a bare column of clocks.
+written `@1:10`, `on 2:00/2:15`, or as a bare column of clocks. Your own time
+for a swim goes after `in` — `1 x 100 Free in 1:32` — and replaces Polar's total
+on the card, every length scaled alike (where Polar put the walls is exactly
+what is in doubt); rankings keep Polar's recorded time.
 
 A dynamic program matches each planned swim to a run of Polar lengths, scoring
 rest boundaries (a swim starts where you stopped; a short traffic stop inside
@@ -467,6 +470,10 @@ The alignment then does three things:
   The same goes for a swim with one length far over what the stroke costs
   (1.45x) and no short length beside it: a misplaced turn moves time between
   lengths, a folded rest adds it (2026-10-30: a fast 50 back logged 51.2 / 32.0).
+  Between two one-stroke swims of three or more lengths each, the break is
+  measured instead of flagged: the excess of the last length and the next
+  swim's first over each swim's usual length goes back into rest (2026-11-20:
+  100 free into 200 free, 2.4 + 7.2 s — he remembered about 10 s).
 
 **Without a plan: the send-off clock** (`sendoff.py`). A set swum on a send-off
 has a clock in it that Polar ignores: every rep starts on the minute, so a rep

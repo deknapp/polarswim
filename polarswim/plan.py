@@ -159,6 +159,9 @@ class Swim:
     # Strokes that change inside the swim, in order: `50 FL/25 BK/25 BR/25 FR`,
     # `25 swim / 25 drill`. Empty when the swim is one stroke (or an even IM).
     legs: list[tuple[int, str | None]] = field(default_factory=list)
+    # The swimmer's own time for it, `1 x 100 Free in 1:32`: better evidence than
+    # where Polar put the walls, so it replaces Polar's total on the card.
+    hand_time_s: float | None = None
 
 
 _STROKE_WORDS = (
@@ -371,6 +374,9 @@ _ROUND_LINE = re.compile(r"^\s*R(\d)\s*:\s*(.*)$")
 _ODD_EVEN_LINE = re.compile(r"^\s*odd\b.*/\s*even\b", re.I)
 # `@base + 15"` is a send-off, not a 15-yard swim.
 _BASE = re.compile(r"@\s*base\b.*$", re.I)
+# `100 Free in 1:32` — the swimmer's own time. Read and removed before send-offs
+# are looked for, which would otherwise take the bare clock as one.
+_HAND_TIME = re.compile(r"\bin\s+(\d{0,2}:\d{2}(?:\.\d+)?)(?![\d:])", re.I)
 # `75 IM w/o Free`: a medley of the strokes left, in order. The slash in `w/o`
 # must not read as an odd/even pair.
 _IM_WITHOUT = re.compile(
@@ -403,6 +409,10 @@ def _alternation(desc: str, drill: bool = False) -> list[str | None]:
 
 def _parse_line(line: str, line_no: int) -> list[Swim]:
     line = _BASE.sub("", line)
+    hand_time = None
+    if hm := _HAND_TIME.search(line):
+        hand_time = _clock(hm.group(1))
+        line = (line[:hm.start()] + line[hm.end():]).strip()
     intervals = []
     m = _INTERVALS.search(line)
     if m:
@@ -472,7 +482,8 @@ def _parse_line(line: str, line_no: int) -> list[Swim]:
             swims.append(Swim(
                 yards=yards, stroke=stroke, line_no=line_no,
                 text=line, easy=bool(re.search(r"\b(?:EZ|easy)\b", desc, re.I)),
-                intervals=intervals, joined=i < len(pieces) - 1, legs=legs))
+                intervals=intervals, joined=i < len(pieces) - 1, legs=legs,
+                hand_time_s=hand_time))
     if swims:
         swims[-1].last_of_line = True
     return swims
@@ -952,6 +963,37 @@ class PlanReading:
     # the plan holds. Under-counts are left alone: a 200 cut to 150 in traffic
     # was a 150. An over-count is Polar's extra, and the swimmer's word stands.
     yards: dict[int, int] = field(default_factory=dict)
+    # idx -> (seconds, at_start): rest Polar folded into this length where two
+    # planned swims ran together with no gap logged. Measured, not flagged: the
+    # excess over each swim's own usual length (11/20: the ladder's 100 ran into
+    # its 200 — 26.4 then 32.8 against 24.0 and 25.6, a 10 s break he remembers).
+    folded: dict[int, tuple[float, bool]] = field(default_factory=dict)
+    # idx -> the swimmer's own time for the swim that length belongs to.
+    hand_time: dict[int, float] = field(default_factory=dict)
+
+
+# A folded break is measured only from swims long enough to have a usual
+# length, and only believed when it adds up to a break, not to noise.
+FOLD_MIN_LENGTHS = 3
+FOLD_MIN_S = 3.0
+
+
+def _folded(g: pd.DataFrame, a: list[int], b: list[int]) -> dict[int, tuple[float, bool]]:
+    """How much rest sits in the last length of `a` and the first of `b`."""
+    if len(a) < FOLD_MIN_LENGTHS or len(b) < FOLD_MIN_LENGTHS:
+        return {}
+    da = g.loc[a, "duration_s"].to_numpy(dtype=float)
+    db_ = g.loc[b, "duration_s"].to_numpy(dtype=float)
+    ea = max(0.0, float(da[-1] - np.median(da[:-1])))
+    eb = max(0.0, float(db_[0] - np.median(db_[1:])))
+    if ea + eb < FOLD_MIN_S:
+        return {}
+    out = {}
+    if ea > 0:
+        out[a[-1]] = (round(ea, 2), False)
+    if eb > 0:
+        out[b[0]] = (round(eb, 2), True)
+    return out
 
 
 def read(g: pd.DataFrame, swims: list[Swim],
@@ -969,6 +1011,8 @@ def read(g: pd.DataFrame, swims: list[Swim],
     prev_key = object()
     hidden = set()
     warmup, yards = set(), {}
+    folded: dict[int, tuple[float, bool]] = {}
+    hand_time: dict[int, float] = {}
     started = False
     for seg in segs:
         if seg.swim_no is None and not started:
@@ -1063,6 +1107,8 @@ def read(g: pd.DataFrame, swims: list[Swim],
                                  or EXPECTED_RATIO.get(legs[0][1], 1.12))
             if sum(max(1, round(x / expect)) for x in d) >= want:
                 yards.update({i: s.yards for i in seg.idxs})
+        if s.hand_time_s and len(d) == want:
+            hand_time.update({i: float(s.hand_time_s) for i in seg.idxs})
         for i, t, p in zip(seg.idxs, d, pos):
             rep_of[i] = rep
             set_of[i] = set_no
@@ -1080,9 +1126,25 @@ def read(g: pd.DataFrame, swims: list[Swim],
         if (a.swim_no is not None and b.swim_no is not None and a.idxs and b.idxs
                 and not swims[a.swim_no].joined
                 and g.at[b.idxs[0], "rest_before_s"] <= REST_GAP_S):
-            hidden.add(a.idxs[-1])
+            # One-stroke swims of several lengths each say what their usual
+            # length is, so the break is measured and moved back into rest. Only
+            # where that cannot be done is the length flagged instead.
+            # A re-split is undone: it spread the folded break over every length
+            # of the swim as if it were pace (11/20: the 200 after the 100).
+            fold = (_folded(g, a.idxs, b.idxs)
+                    if not legs_of(swims[a.swim_no])[1:] and not legs_of(swims[b.swim_no])[1:]
+                    and not any(kind.get(i) == "merged" for i in [*a.idxs, *b.idxs])
+                    else {})
+            if fold:
+                folded.update(fold)
+                for i in [*a.idxs, *b.idxs]:
+                    if kind.get(i) == "resplit":
+                        factor.pop(i, None)
+                        kind.pop(i, None)
+            else:
+                hidden.add(a.idxs[-1])
     return PlanReading(stroke, factor, kind, rep_of, set_of, label, segs, shape,
-                       hidden, warmup, yards)
+                       hidden, warmup, yards, folded, hand_time)
 
 
 def _shape(legs: list[tuple[int, str | None]]) -> str:
@@ -1110,6 +1172,9 @@ def restructure(df: pd.DataFrame, readings: dict[int, PlanReading]) -> pd.DataFr
     df["rest_hidden"] = False
     df["warmup"] = False
     df["plan_yards"] = np.nan
+    df["rest_folded_s"] = 0.0
+    df["folded_at_start"] = False
+    df["hand_time_s"] = np.nan
     for wid, r in readings.items():
         rows = df["workout_id"] == wid
         df.loc[rows, "warmup"] = [int(i) in r.warmup for i in df.loc[rows, "idx"]]
@@ -1118,6 +1183,10 @@ def restructure(df: pd.DataFrame, readings: dict[int, PlanReading]) -> pd.DataFr
         df.loc[rows, "rep_id"] = [r.rep_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
         df.loc[rows, "set_id"] = [r.set_of.get(int(i), 0) for i in df.loc[rows, "idx"]]
         df.loc[rows, "rest_hidden"] = [int(i) in r.rest_hidden for i in df.loc[rows, "idx"]]
+        ids = [int(i) for i in df.loc[rows, "idx"]]
+        df.loc[rows, "rest_folded_s"] = [r.folded.get(i, (0.0, False))[0] for i in ids]
+        df.loc[rows, "folded_at_start"] = [r.folded.get(i, (0.0, False))[1] for i in ids]
+        df.loc[rows, "hand_time_s"] = [r.hand_time.get(i, np.nan) for i in ids]
     df["rep_lengths"] = df.groupby(["workout_id", "rep_id"])["idx"].transform("size")
     return df
 
