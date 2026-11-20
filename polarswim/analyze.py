@@ -1002,6 +1002,14 @@ def read_structure(df: pd.DataFrame, params: dict, ratios: dict[str, float],
     # boundaries Polar missed, which the medley windows were matched across.
     parity = sendoff.read_parity(df, trains, ratios)
     matches = sendoff.without_trains(matches, parity)
+    # Off the clock, a set whose reps alternate shape (`odd free / even fly-back`,
+    # `100 fly/back, 100 breast/free`) is read only in reps nothing above took.
+    from . import alternation
+    claimed = {(int(m.workout_id), int(i)) for m in matches for i in m.idxs}
+    claimed |= {(int(r.workout_id), int(i)) for r in [*found, *blocked, *parity]
+                for i in r.idxs}
+    alternating = alternation.read_alternation(df, claimed, set(readings))
+    parity = parity + alternating
     # Only now is it known which reps nothing else read, and which whole medleys
     # the day holds to measure a broken one against.
     read = [*matches, *(pat.PatternMatch(r.workout_id, r.rep_id, 0, (), 1, [], r.idxs,

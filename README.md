@@ -30,7 +30,7 @@ python3 -m venv .venv
 .venv/bin/python -m polarswim --db sample/sample.db report --from 2026-08-01
 .venv/bin/python -m polarswim --db sample/sample.db serve      # web UI on :8770
 
-.venv/bin/pytest -q                                # 525 tests, no network
+.venv/bin/pytest -q                                # 531 tests, no network
 ```
 
 ### Optional: `polarswim` on your PATH
@@ -480,6 +480,18 @@ again into two groups, it is read as the two non-free medley pairs (fly/back,
 back/breast). On 2026-10-23's `25 x 50 @ 1:00, odd free / even IM` the
 label-free detector went from 48% to 96% of lengths; history-wide it fires on
 six sets and changes one length.
+
+**Without a plan: sets that alternate shape** (`alternation.py`). Off the
+clock, the same sets went unread, and this swimmer's fly is the stroke pace
+cannot see — a fly 25 runs within a few percent of his free. What gives it away
+is the shape of the rep: a fly/back 50 or 100 is fast then clearly slower, a
+breast/free one slow then fast. One such rep proves nothing (a free 50 can
+fade), so shapes are read only as a set: four or more reps alternating
+fly/back and breast/free, or six or more where every other rep is free and the
+rest are not — whose non-free reps, split again by rep number, are fly/back
+where most are fast-then-slow and the partner group one stroke, breast. On
+2026-11-20 the label-free detector went from 74 to 94 of 94 lengths;
+history-wide it fires on one other day and marks four lengths not-free.
 
 **Without a plan: blocks of another stroke** (`blocks.py`). `300 Swim (75
 Back/150 Free/75 Back)` swum unbroken is one rep, and a rep was one stroke, so
