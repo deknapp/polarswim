@@ -79,3 +79,47 @@ def test_a_fading_free_50_alone_is_not_fly():
 def test_planned_workouts_are_skipped():
     df = _featured(DUR, gaps=REST).assign(predicted="freestyle")
     assert alternation.read_alternation(df, set(), planned={1}) == []
+
+
+# 2026-11-23, the last of the day: free 50s, then lengths 75-88 as Polar logged
+# them — fly/back, back/breast, back, breast, fly/back, fly/back, 50 kick.
+STROKE_DUR = [25.6, 23.2, 25.6, 23.2, 22.4, 23.2, 23.2, 20.0,
+              25.6, 30.4, 31.2, 29.6, 34.4, 31.2, 32.8, 29.6, 24.0, 29.6,
+              33.6, 28.8, 39.2, 37.6]
+STROKE_REST = [60, 0, 11.2, 0, 11.2, 0, 31.2, 0,
+               64.0, 0, 17.6, 0, 15.2, 0, 5.6, 0, 32.0, 0, 20.8, 0, 40.8, 0]
+
+
+def test_stroke_50s_with_no_free_between_read_fly_back():
+    df = _featured(STROKE_DUR, gaps=STROKE_REST).assign(predicted="freestyle")
+    lab = _labels(alternation.read_alternation(df, set()))
+    for a, b in ((9, 10), (17, 18)):
+        assert (lab[a], lab[b]) == ("butterfly", "backstroke")
+    # The free 50s before it are not part of the set.
+    assert not any(i in lab for i in range(1, 9))
+    # The one-stroke 50s are not freestyle, whatever they are.
+    for i in range(11, 17):
+        assert lab[i] != "freestyle", i
+    # The last fly/back's first length ran slow (33.6 s): not-free, not named.
+    assert (lab[19], lab[20]) == ("undetermined", "undetermined")
+
+
+def test_slow_50s_without_two_fly_back_shapes_are_left_alone():
+    dur = STROKE_DUR[:8] + [31.2, 29.6, 34.4, 31.2, 32.8, 29.6, 31.2, 30.4]
+    df = _featured(dur, gaps=STROKE_REST[:16]).assign(predicted="freestyle")
+    assert not alternation.read_alternation(df, set())
+
+
+def test_a_misplaced_wall_is_not_a_fly_back_pair():
+    """2026-07-02: 16.0 then 46.4 s is one 50 with its wall in the wrong place."""
+    dur = list(STROKE_DUR)
+    dur[16], dur[17] = 16.0, 46.4
+    df = _featured(dur, gaps=STROKE_REST).assign(predicted="freestyle")
+    assert not alternation.read_alternation(df, set())
+
+
+def test_drill_calls_inside_a_stroke_set_stand():
+    df = _featured(STROKE_DUR, gaps=STROKE_REST).assign(predicted="freestyle")
+    df.loc[df["idx"].isin([13, 14]), "predicted"] = "drill"
+    lab = _labels(alternation.read_alternation(df, set()))
+    assert 13 not in lab and 14 not in lab

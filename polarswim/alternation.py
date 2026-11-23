@@ -63,6 +63,10 @@ HALVES_MIN_REPS = 4
 PARITY_MIN_REPS = 6
 PARITY_AGREE = 0.7           # share of the fast parity that must be F
 PARITY_SLOW_MAX_F = 0.2      # ...and of the slow parity that may be
+STROKE_MIN_REPS = 4
+STROKE_MIN_FS = 2
+STROKE_MAX_SHIFT = 1.5       # an FS slower than this in its back half is a misplaced wall
+STROKE_MIN_LEN = 0.8         # ...as is any length under this x the day's free
 GROUP_AGREE = 2 / 3          # share of a slow sub-group that must be FS
 CONFIDENCE = 0.6
 
@@ -195,8 +199,61 @@ def _parity(w: int, run, toks, pred) -> Reading | None:
     return None
 
 
+def _plausible_fs(g: pd.DataFrame, ref: float) -> bool:
+    p = g["pace_s"].to_numpy(dtype=float)
+    h = len(p) // 2
+    return (p[h:].mean() / p[:h].mean() <= STROKE_MAX_SHIFT
+            and p.min() >= STROKE_MIN_LEN * ref)
+
+
+def _stroke_sets(w: int, run, toks, pred, params) -> list[Reading]:
+    """Runs of slow reps holding fly/back pairs; see the module docstring, 3."""
+    from .blocks import _name
+
+    out = []
+    k = 0
+    while k < len(toks):
+        if toks[k] in (None, "F"):
+            k += 1
+            continue
+        e = k
+        while e < len(toks) and toks[e] not in (None, "F"):
+            e += 1
+        # A misplaced wall (16.0 then 46.4 s on 2026-07-02) also reads FS:
+        # demote it before counting fly/back pairs.
+        seg = [t if t != "FS" or _plausible_fs(g, ref) else "X"
+               for g, t in zip(run[k:e], toks[k:e])
+               for ref in [float(g["free_ref_s"].iloc[0])]]
+        if (e - k >= STROKE_MIN_REPS and seg.count("FS") >= STROKE_MIN_FS
+                and "S" in seg):
+            labels, pattern, idxs = {}, {}, []
+            for g, t in zip(run[k:e], seg):
+                ids = [int(i) for i in g["idx"]]
+                idxs += ids
+                if t == "FS":
+                    h = len(ids) // 2
+                    for q, i in enumerate(ids):
+                        labels[i] = IM_ORDER[q >= h]
+                        pattern[i] = "fly/back"
+                elif t == "S" and all(pred.get(i) in (None, "freestyle")
+                                      for i in ids):
+                    # Only over a free guess: drill and kick calls stand.
+                    ratio = float(g["pace_s"].mean() / g["free_ref_s"].iloc[0])
+                    name = _name(ratio, params or {})
+                    for i in ids:
+                        labels[i] = name
+                else:
+                    for i in ids:
+                        if pred.get(i) == "freestyle":
+                            labels[i] = "undetermined"
+            out.append(Reading(w, labels, pattern, idxs, set(idxs)))
+        k = e
+    return out
+
+
 def read_alternation(df: pd.DataFrame, claimed: set[tuple[int, int]],
-                     planned: set[int] | frozenset = frozenset()) -> list[Reading]:
+                     planned: set[int] | frozenset = frozenset(),
+                     params: dict | None = None) -> list[Reading]:
     """Halves and parity sets in reps nothing else has read."""
     out: list[Reading] = []
     if df.empty or "free_ref_s" not in df.columns:
@@ -230,6 +287,9 @@ def read_alternation(df: pd.DataFrame, claimed: set[tuple[int, int]],
                 r = _parity(w, run, toks, pred)
                 if r is not None:
                     out.append(r)
+                    continue
+                out.extend(r for part in _split_none(run, toks)
+                           for r in _stroke_sets(w, *part, pred, params))
     return out
 
 

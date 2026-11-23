@@ -1008,7 +1008,7 @@ def read_structure(df: pd.DataFrame, params: dict, ratios: dict[str, float],
     claimed = {(int(m.workout_id), int(i)) for m in matches for i in m.idxs}
     claimed |= {(int(r.workout_id), int(i)) for r in [*found, *blocked, *parity]
                 for i in r.idxs}
-    alternating = alternation.read_alternation(df, claimed, set(readings))
+    alternating = alternation.read_alternation(df, claimed, set(readings), params)
     parity = parity + alternating
     # Only now is it known which reps nothing else read, and which whole medleys
     # the day holds to measure a broken one against.
