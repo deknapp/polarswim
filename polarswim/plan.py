@@ -996,6 +996,9 @@ def _folded(g: pd.DataFrame, a: list[int], b: list[int]) -> dict[int, tuple[floa
     return out
 
 
+WARMUP_MAX_SHARE = 0.4   # lead-in longer than this share of the lengths keeps its sets
+
+
 def read(g: pd.DataFrame, swims: list[Swim],
          ratios: dict[str, float] | None = None,
          hr: np.ndarray | None = None) -> PlanReading:
@@ -1014,8 +1017,13 @@ def read(g: pd.DataFrame, swims: list[Swim],
     folded: dict[int, tuple[float, bool]] = {}
     hand_time: dict[int, float] = {}
     started = False
+    # Lengths before the plan read as one warm-up only when they are a small
+    # part of the swim. On 2026-11-23 he wrote down only the last 50s: the 74
+    # lengths before them were free intervals, not a 1,825 yd warm-up.
+    lead = segs[0].idxs if segs and segs[0].swim_no is None else []
+    collapse = len(lead) <= WARMUP_MAX_SHARE * len(g)
     for seg in segs:
-        if seg.swim_no is None and not started:
+        if seg.swim_no is None and not started and collapse:
             # Before the plan: one set, whatever the rests say.
             if not warmup:
                 set_no += 1
