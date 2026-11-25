@@ -955,9 +955,9 @@ class PlanReading:
     # on a send-off the swimmer rested 10-20 s at the wall and Polar folded it
     # into the length, so its time is swim + rest and says nothing about pace.
     rest_hidden: set[int] = field(default_factory=set)
-    # Unplanned lengths before the plan's first swim. The swimmer arrived,
-    # warmed up and doesn't remember how (10/22: fin kick and "other stuff"), so
-    # eleven guessed rows say less than one honest "warm-up".
+    # Unused since 2026-11-25: lengths before the plan keep the detector's
+    # guesses rather than folding into one "warm-up". Kept for the report's
+    # column; always empty.
     warmup: set[int] = field(default_factory=set)
     # idx -> the planned yards of its swim, where Polar logged MORE lengths than
     # the plan holds. Under-counts are left alone: a 200 cut to 150 in traffic
@@ -996,9 +996,6 @@ def _folded(g: pd.DataFrame, a: list[int], b: list[int]) -> dict[int, tuple[floa
     return out
 
 
-WARMUP_MAX_SHARE = 0.4   # lead-in longer than this share of the lengths keeps its sets
-
-
 def read(g: pd.DataFrame, swims: list[Swim],
          ratios: dict[str, float] | None = None,
          hr: np.ndarray | None = None) -> PlanReading:
@@ -1017,24 +1014,10 @@ def read(g: pd.DataFrame, swims: list[Swim],
     folded: dict[int, tuple[float, bool]] = {}
     hand_time: dict[int, float] = {}
     started = False
-    # Lengths before the plan read as one warm-up only when they are a small
-    # part of the swim. On 2026-11-23 he wrote down only the last 50s: the 74
-    # lengths before them were free intervals, not a 1,825 yd warm-up.
-    lead = segs[0].idxs if segs and segs[0].swim_no is None else []
-    collapse = len(lead) <= WARMUP_MAX_SHARE * len(g)
+    # Lengths before the plan are never folded into one "warm-up": they keep
+    # their own reps and sets and the detector's stroke guesses (he asked
+    # 2026-11-25 — a guess per rep beats a label he never gave).
     for seg in segs:
-        if seg.swim_no is None and not started and collapse:
-            # Before the plan: one set, whatever the rests say.
-            if not warmup:
-                set_no += 1
-                prev_key = ("warmup",)
-            for i in seg.idxs:
-                if not warmup or g.at[i, "rest_before_s"] > REST_GAP_S:
-                    rep += 1
-                rep_of[i] = rep
-                set_of[i] = set_no
-                warmup.add(i)
-            continue
         if seg.swim_no is None:
             # Unplanned: keep the rest structure the data shows.
             prev_rest = None
@@ -1043,7 +1026,7 @@ def read(g: pd.DataFrame, swims: list[Swim],
                     rep += 1
                 rep_of[i] = rep
                 prev_rest = g.at[i, "rest_before_s"]
-                key = ("free", g.at[i, "set_id"])
+                key = ("free", g.at[i, "set_id"] if "set_id" in g.columns else 0)
                 if key != prev_key:
                     set_no += 1
                     prev_key = key

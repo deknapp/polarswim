@@ -380,15 +380,18 @@ def test_a_numbered_rep_is_not_a_skipped_line_but_a_double_hash_is():
     assert all(s.stroke == "IM" and not s.legs for s in swims)
 
 
-def test_before_the_plan_is_one_warm_up_set_and_an_over_count_keeps_plan_yards():
+def test_before_the_plan_keeps_its_reps_and_an_over_count_keeps_plan_yards():
+    # Never folded into one "warm-up" (he asked 2026-11-25): each rep before
+    # the plan stays its own rep, so the detector's stroke guesses show.
     swims = plan.parse_plan("1 x 50 Free\n1 x 50 Fly")
     df = _lengths([[40], [30, 31], [29, 26], [33, 34, 30]])
     r = plan.read(df, swims)
-    assert r.warmup == {1, 2, 3}
-    assert len({r.set_of[i] for i in (1, 2, 3)}) == 1
+    assert r.warmup == set()
+    assert r.rep_of[1] != r.rep_of[2]
     assert r.yards == {6: 50, 7: 50, 8: 50}
     out = plan.restructure(df, {1: r})
-    assert out["warmup"].tolist()[:4] == [True, True, True, False]
+    assert not out["warmup"].any()
+
 
 
 MONSTER_MASH = """\
