@@ -37,6 +37,24 @@ fade never does is ALTERNATE. So shapes are only read as a set:
      ``FS`` group the slow reps are only marked not-free where the
      classifier called them free; which stroke they were stays a guess.
 
+  4. **Stroke cycles** — eight or more 50s in a row that go round the four
+     strokes one whole 50 each: `16 x 50 free, breast, back, fly` (2026-11-25
+     lengths 37-68). His fly 50 runs at his free pace (27 s against 26), so
+     pace splits the cycle only into a fast pair and a slow pair, but a
+     medley cycle always puts fly next to free and back next to breast, so
+     the set must go fast, fast, slow, slow round and round. Every 50 of the
+     window has to land in its pair's band, and a stretch of free with one
+     slow 50 never does that. Which way round it goes (fly, back, breast,
+     free or free, breast, back, fly) is read from two cues that must agree:
+     free is the faster of the fast pair and back the slower of the slow pair.
+     If they disagree, only the faster fast position is named (free) and the
+     rest are marked undetermined where the classifier said free. Polar
+     running two 50s into one record (53-56 that day) doesn't matter: the
+     cycle is read in 50s, not in Polar's reps — but at least three in four
+     of the 50s must be a rep of their own. Odd free 100s / even 100 IMs in
+     25s (2026-05-01) cut into 50s also go fast, fast, slow, slow; there no
+     50 is its own rep.
+
 A planned workout is never read here; the plan already says what was swum.
 """
 
@@ -67,6 +85,10 @@ STROKE_MIN_REPS = 4
 STROKE_MIN_FS = 2
 STROKE_MAX_SHIFT = 1.5       # an FS slower than this in its back half is a misplaced wall
 STROKE_MIN_LEN = 0.8         # ...as is any length under this x the day's free
+CYCLE_MIN_UNITS = 8          # two full rounds of the four strokes
+CYCLE_SPLIT = 1.15           # fast pair under this x the day's free, slow pair over it
+CYCLE_GAP = 1.05             # slowest fast 50 against quickest slow 50
+CYCLE_OWN_REP = 0.75         # share of the 50s that must be a Polar rep of their own
 GROUP_AGREE = 2 / 3          # share of a slow sub-group that must be FS
 CONFIDENCE = 0.6
 
@@ -251,6 +273,83 @@ def _stroke_sets(w: int, run, toks, pred, params) -> list[Reading]:
     return out
 
 
+def _unit_runs(seg: list[pd.DataFrame]) -> list[tuple[list[list[int]], list[bool]]]:
+    """Maximal stretches of whole 50s (two lengths each), as lists of idxs.
+
+    A rep of four or six lengths is cut into 50s: Polar sometimes runs two
+    50s together. A rep of an odd number of lengths ends the stretch.
+    """
+    out, cur, own = [], [], []
+    for g in seg:
+        ids = [int(i) for i in g["idx"]]
+        if len(ids) % 2 or len(ids) > 6:
+            if cur:
+                out.append((cur, own))
+            cur, own = [], []
+            continue
+        cur += [ids[q:q + 2] for q in range(0, len(ids), 2)]
+        own += [len(ids) == 2] * (len(ids) // 2)
+    if cur:
+        out.append((cur, own))
+    return out
+
+
+def _cycles(w: int, units: list[list[int]], own: list[bool], pace: dict[int, float],
+            ref: float, pred: dict) -> list[Reading]:
+    """Four-stroke cycles of whole 50s; see the module docstring, 4."""
+    means = [float(np.mean([pace[i] for i in u])) for u in units]
+    if any(not np.isfinite(m) for m in means):
+        return []
+    fast = [m <= CYCLE_SPLIT * ref for m in means]
+    out = []
+    k = 0
+    while k + CYCLE_MIN_UNITS <= len(units):
+        best = None
+        for off in range(4):
+            # Template fast, fast, slow, slow, rotated to start at `off`.
+            want = lambda q: ((q + off) % 4) < 2
+            e = k
+            while e < len(units) and fast[e] == want(e - k):
+                e += 1
+            if e - k >= CYCLE_MIN_UNITS and (best is None or e > best[1]):
+                best = (off, e)
+        if best is None:
+            k += 1
+            continue
+        off, e = best
+        pos = [(q - k + off) % 4 for q in range(k, e)]   # 0,1 fast; 2,3 slow
+        m = {p: [means[q] for q, pp in zip(range(k, e), pos) if pp == p] for p in range(4)}
+        f_max = max(m[0] + m[1])
+        s_min = min(m[2] + m[3])
+        if (s_min < CYCLE_GAP * f_max or any(len(v) < 2 for v in m.values())
+                or np.mean(own[k:e]) < CYCLE_OWN_REP):
+            k += 1
+            continue
+        a, b, c, d = (float(np.median(m[p])) for p in range(4))
+        # Forward (fly back breast free): round the cycle it is free, fly,
+        # back, breast. Reverse (free breast back fly): fly, free, breast, back.
+        free_first = a < b
+        back_first = c > d
+        if free_first == back_first:
+            names = (("freestyle", "butterfly", "backstroke", "breaststroke")
+                     if free_first else
+                     ("butterfly", "freestyle", "breaststroke", "backstroke"))
+        else:
+            names = (("freestyle", None, None, None) if a < b
+                     else (None, "freestyle", None, None))
+        labels, pattern, idxs = {}, {}, []
+        for u, p in zip(units[k:e], pos):
+            for i in u:
+                idxs.append(i)
+                if names[p] is not None:
+                    labels[i] = names[p]
+                elif pred.get(i) == "freestyle":
+                    labels[i] = "undetermined"
+        out.append(Reading(w, labels, pattern, idxs, set()))
+        k = e
+    return out
+
+
 def read_alternation(df: pd.DataFrame, claimed: set[tuple[int, int]],
                      planned: set[int] | frozenset = frozenset(),
                      params: dict | None = None) -> list[Reading]:
@@ -276,7 +375,27 @@ def read_alternation(df: pd.DataFrame, claimed: set[tuple[int, int]],
                 segments.append([])
             else:
                 segments[-1].append(g)
+        pace = dict(zip(W["idx"].astype(int), W["pace_s"].astype(float)))
         for seg in segments:
+            # Stroke cycles first: they are the strictest reading, and the
+            # stretch they claim is not offered to the others.
+            cyc = [r for units, own in _unit_runs(seg)
+                   for r in _cycles(w, units, own, pace, ref, pred)]
+            # A Polar rep holding two 50s of different strokes is a mixed rep,
+            # so the later whole-rep pass doesn't flatten it to one stroke.
+            short = {"freestyle": "free", "butterfly": "fly", "backstroke": "back",
+                     "breaststroke": "breast"}
+            for r in cyc:
+                for g in seg:
+                    ids = [int(i) for i in g["idx"]]
+                    got = [r.labels.get(i) for i in ids]
+                    if all(x is not None for x in got) and len(set(got)) > 1:
+                        name = "/".join(dict.fromkeys(short.get(x, x) for x in got))
+                        for i in ids:
+                            r.pattern[i] = name
+            out.extend(cyc)
+            taken = {i for r in cyc for i in r.idxs}
+            seg = [g for g in seg if not any(int(i) in taken for i in g["idx"])]
             for run in _runs(seg):
                 toks = [None if g is None else token(g, ref) for g in run]
                 found = [r for part in _split_none(run, toks)

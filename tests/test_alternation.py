@@ -123,3 +123,42 @@ def test_drill_calls_inside_a_stroke_set_stand():
     df.loc[df["idx"].isin([13, 14]), "predicted"] = "drill"
     lab = _labels(alternation.read_alternation(df, set()))
     assert 13 not in lab and 14 not in lab
+
+
+# 2026-11-25 lengths 35-68 as Polar logged them: a back 50 before a long break,
+# then 16 x 50 free, breast, back, fly x4 (53-56, the third round's free and
+# breast, ran together into one record). Index 1 here is length 35 of the day.
+CYC_DUR = [37.6, 33.6,
+           24.8, 24.0, 32.0, 29.6, 34.4, 30.4, 27.2, 27.2,
+           28.0, 25.6, 34.4, 32.8, 37.6, 32.8, 28.0, 25.6,
+           29.6, 26.4, 36.0, 28.8, 35.2, 34.4, 27.2, 30.4,
+           26.4, 27.2, 32.0, 32.8, 36.0, 33.6, 27.2, 26.4]
+CYC_REST = [7.2, 0, 162.4, 0, 11.2, 0, 7.2, 0, 6.4, 0, 15.2, 0, 6.4, 0, 8.0, 0,
+            4.8, 0, 16.8, 0, 0, 0, 10.4, 0, 8.8, 0, 12.0, 0, 6.4, 0, 10.4, 0, 5.6, 0]
+
+
+def test_reverse_im_cycle_of_50s_names_every_stroke():
+    df = _featured(CYC_DUR, gaps=CYC_REST).assign(predicted="freestyle")
+    lab = _labels(alternation.read_alternation(df, set()))
+    names = ["freestyle", "breaststroke", "backstroke", "butterfly"] * 4
+    for q, name in enumerate(names):
+        a = 3 + 2 * q
+        assert (lab[a], lab[a + 1]) == (name, name), (a + 34, name)
+    # The back 50 before the break is not part of the cycle.
+    assert 1 not in lab and 2 not in lab
+
+
+def test_two_50s_in_one_polar_record_are_a_mixed_rep():
+    df = _featured(CYC_DUR, gaps=CYC_REST).assign(predicted="freestyle")
+    rs = alternation.read_alternation(df, set())
+    pat = {i: p for r in rs for i, p in r.pattern.items()}
+    assert {pat[i] for i in (19, 20, 21, 22)} == {"free/breast"}
+
+
+def test_100s_cut_into_50s_are_not_a_cycle():
+    # 2026-05-01: odd 100 free / even 100 IM in 25s also goes fast, fast,
+    # slow, slow when cut into 50s, but there no 50 is a rep of its own.
+    pace = {i + 1: d for i, d in enumerate(CYC_DUR[2:])}
+    units = [[i, i + 1] for i in range(1, 33, 2)]
+    assert alternation._cycles(1, units, [True] * 16, pace, 25.6, {})
+    assert not alternation._cycles(1, units, [False] * 16, pace, 25.6, {})
